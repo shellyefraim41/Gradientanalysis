@@ -1,0 +1,33 @@
+{
+  "z_index": 15,
+  "z_is_one_based": true,
+  "timepoints": null,
+  "position_x_order": "descending",
+  "channels": [
+    {
+      "label": "GFP",
+      "match": ["GFP", "488"],
+      "index": null,
+      "plot_color": "#20a83e",
+      "rgb": [0.0, 1.0, 0.0]
+    },
+    {
+      "label": "Cy5",
+      "match": ["Cy5", "647"],
+      "index": null,
+      "plot_color": "#d62a8b",
+      "rgb": [1.0, 0.0, 1.0]
+    }
+  ],
+  "reference_positions": {
+    "GFP": null,
+    "Cy5": null
+  },
+  "smoothing_window_px": 101,
+  "trendline_window_px": 201,
+  "correction_fit_degree": 2,
+  "bridge_position": 4,
+  "preview_low_percentile": 1.0,
+  "preview_high_percentile": 99.8,
+  "save_corrected_tiles": true
+}

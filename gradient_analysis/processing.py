@@ -1,0 +1,217 @@
+"""Pure numerical operations used by the pipeline."""
+
+from __future__ import annotations
+
+import numpy as np
+
+UINT16_LEVELS = 65_536
+
+
+def stitch(tiles: list[np.ndarray]) -> np.ndarray:
+    """Place equal-height positions directly end-to-end from left to right."""
+    if not tiles:
+        raise ValueError("At least one tile is required.")
+    heights = {tile.shape[0] for tile in tiles}
+    if len(heights) != 1:
+        raise ValueError(f"All tiles must have the same height; received {sorted(heights)}")
+    return np.concatenate(tiles, axis=1)
+
+
+def x_profile(image: np.ndarray) -> np.ndarray:
+    """Mean intensity for every image column (average over Y)."""
+    return np.mean(image, axis=0, dtype=np.float64)
+
+
+def smooth_profile(profile: np.ndarray, window: int) -> np.ndarray:
+    """Robustly smooth a 1-D profile using an odd reflected moving average."""
+    if profile.size < 3:
+        return profile.astype(np.float64, copy=True)
+    window = max(3, min(int(window), int(profile.size)))
+    if window % 2 == 0:
+        window -= 1
+    pad = window // 2
+    padded = np.pad(profile.astype(np.float64), pad, mode="reflect")
+    return np.convolve(padded, np.ones(window) / window, mode="valid")
+
+
+def fitted_illumination_profile(
+    reference_profile: np.ndarray,
+    smoothing_window: int,
+    degree: int = 2,
+) -> tuple[np.ndarray, float]:
+    """Fit a broad polynomial laser/illumination profile to one reference tile."""
+    if degree < 0:
+        raise ValueError("Polynomial degree must be non-negative.")
+    smooth = smooth_profile(reference_profile, smoothing_window)
+    x = np.linspace(-1.0, 1.0, smooth.size)
+    coefficients = np.polyfit(x, smooth, min(degree, smooth.size - 1))
+    fitted = np.polyval(coefficients, x).astype(np.float64)
+    plateau = float(np.median(fitted))
+    floor = max(plateau * 0.05, np.finfo(float).eps)
+    fitted = np.maximum(fitted, floor)
+    return fitted, plateau
+
+
+def linearity_score(profile: np.ndarray, smoothing_window: int) -> float:
+    """Score bright, flat profiles highly; used only for automatic selection."""
+    smooth = smooth_profile(profile, smoothing_window)
+    brightness = max(float(np.median(smooth)), np.finfo(float).eps)
+    x = np.linspace(-1.0, 1.0, smooth.size)
+    slope = abs(float(np.polyfit(x, smooth / brightness, 1)[0]))
+    roughness = float(np.std(smooth / brightness))
+    return brightness / (1.0 + 8.0 * slope + 8.0 * roughness)
+
+
+def choose_reference(profiles: list[np.ndarray], smoothing_window: int) -> int:
+    """Return the list index of the brightest, flattest candidate profile."""
+    if not profiles:
+        raise ValueError("No profiles were supplied.")
+    return int(np.argmax([linearity_score(p, smoothing_window) for p in profiles]))
+
+
+def correction_curve(reference_profile: np.ndarray, smoothing_window: int) -> tuple[np.ndarray, float]:
+    """Return plateau/fitted_reference(x), with a floor to prevent noise blow-up."""
+    fitted, plateau = fitted_illumination_profile(reference_profile, smoothing_window, degree=2)
+    return plateau / fitted, plateau
+
+
+def correct_tile(tile: np.ndarray, curve: np.ndarray) -> np.ndarray:
+    """Apply a local-x illumination correction and preserve floating precision."""
+    if tile.shape[1] != curve.size:
+        raise ValueError("Correction curve width does not match tile width.")
+    return tile.astype(np.float32) * curve.astype(np.float32)[np.newaxis, :]
+
+
+def to_uint16(image: np.ndarray) -> tuple[np.ndarray, int]:
+    """Round corrected values to viewer-compatible uint16 and report clipping."""
+    nonfinite = int(np.count_nonzero(~np.isfinite(image)))
+    below = int(np.count_nonzero(image < 0))
+    above = int(np.count_nonzero(image > np.iinfo(np.uint16).max))
+    safe = np.nan_to_num(
+        image,
+        nan=0.0,
+        posinf=float(np.iinfo(np.uint16).max),
+        neginf=0.0,
+    )
+    converted = np.clip(np.rint(safe), 0, np.iinfo(np.uint16).max).astype(np.uint16)
+    return converted, nonfinite + below + above
+
+
+def empty_uint16_histogram() -> np.ndarray:
+    """Create an exact intensity histogram suitable for streaming accumulation."""
+    return np.zeros(UINT16_LEVELS, dtype=np.int64)
+
+
+def update_uint16_histogram(histogram: np.ndarray, image: np.ndarray) -> None:
+    """Add one uint16 image to an existing histogram in-place."""
+    if histogram.shape != (UINT16_LEVELS,) or histogram.dtype != np.int64:
+        raise ValueError("Histogram must be an int64 array with 65,536 bins.")
+    if image.dtype != np.uint16:
+        raise ValueError(f"Histogram input must be uint16, received {image.dtype}.")
+    histogram += np.bincount(image.reshape(-1), minlength=UINT16_LEVELS)
+
+
+def histogram_percentile_range(
+    histogram: np.ndarray, low_percentile: float, high_percentile: float
+) -> tuple[int, int]:
+    """Return robust display limits from an accumulated uint16 histogram."""
+    if not 0 <= low_percentile < high_percentile <= 100:
+        raise ValueError("Percentiles must satisfy 0 <= low < high <= 100.")
+    total = int(histogram.sum())
+    if total == 0:
+        raise ValueError("Cannot calculate a display range from an empty histogram.")
+    cumulative = np.cumsum(histogram)
+
+    def value_at(percentile: float) -> int:
+        rank = percentile / 100.0 * (total - 1)
+        return int(np.searchsorted(cumulative, rank, side="right"))
+
+    low = value_at(low_percentile)
+    high = value_at(high_percentile)
+    if high <= low:
+        occupied = np.flatnonzero(histogram)
+        low, high = int(occupied[0]), int(occupied[-1])
+    return low, high
+
+
+def image_percentile_range(
+    image: np.ndarray,
+    low_percentile: float,
+    high_percentile: float,
+) -> tuple[int, int]:
+    """Return robust display limits for a single image."""
+    if image.dtype == np.uint16:
+        histogram = empty_uint16_histogram()
+        update_uint16_histogram(histogram, image)
+        return histogram_percentile_range(histogram, low_percentile, high_percentile)
+    low, high = np.percentile(image, [low_percentile, high_percentile])
+    if high <= low:
+        high = low + 1
+    return int(round(float(low))), int(round(float(high)))
+
+
+def position_span(position_list_index: int, tile_width: int) -> tuple[int, int]:
+    """Return the stitched x start/end pixel coordinates for one position."""
+    if position_list_index < 0:
+        raise ValueError("Position list index must be non-negative.")
+    if tile_width <= 0:
+        raise ValueError("Tile width must be positive.")
+    start = int(position_list_index) * int(tile_width)
+    return start, start + int(tile_width)
+
+
+def linear_fit(profile: np.ndarray, pixel_size_um: float | None = None) -> dict[str, float | None]:
+    """Fit y = slope*x + intercept and report slope plus R²."""
+    y = profile.astype(np.float64)
+    x = np.arange(y.size, dtype=np.float64)
+    slope, intercept = np.polyfit(x, y, 1)
+    fitted = slope * x + intercept
+    ss_res = float(np.sum((y - fitted) ** 2))
+    ss_tot = float(np.sum((y - float(np.mean(y))) ** 2))
+    r_squared = 1.0 if ss_tot == 0.0 else 1.0 - ss_res / ss_tot
+    slope_per_um = None if not pixel_size_um else float(slope / pixel_size_um)
+    return {
+        "slope_per_pixel": float(slope),
+        "slope_per_um": slope_per_um,
+        "intercept": float(intercept),
+        "r_squared": float(r_squared),
+    }
+
+
+def display_scale(image: np.ndarray, low_value: float, high_value: float) -> np.ndarray:
+    """Linearly map fixed intensity limits to uint8 for PNG visualization only."""
+    if high_value <= low_value:
+        return np.zeros(image.shape, dtype=np.uint8)
+    scaled = np.clip(
+        (image.astype(np.float32) - low_value) / (high_value - low_value),
+        0.0,
+        1.0,
+    )
+    return np.round(scaled * 255).astype(np.uint8)
+
+
+def colorize_scaled(
+    image: np.ndarray,
+    low_value: float,
+    high_value: float,
+    color: tuple[float, float, float],
+) -> np.ndarray:
+    """Map one grayscale image into an RGB channel-colored preview."""
+    scaled = display_scale(image, low_value, high_value).astype(np.float32) / 255.0
+    rgb = scaled[..., None] * np.asarray(color, dtype=np.float32)
+    return np.round(np.clip(rgb, 0.0, 1.0) * 255).astype(np.uint8)
+
+
+def merge_rgb(
+    images: list[np.ndarray],
+    colors: list[tuple[float, float, float]],
+    display_ranges: list[tuple[float, float]],
+) -> np.ndarray:
+    """Create an additive RGB merge using one fixed range per channel."""
+    if not (len(images) == len(colors) == len(display_ranges)):
+        raise ValueError("Images, colors, and display ranges must have equal lengths.")
+    rgb = np.zeros((*images[0].shape, 3), dtype=np.float32)
+    for image, color, limits in zip(images, colors, display_ranges):
+        scaled = display_scale(image, *limits).astype(np.float32) / 255.0
+        rgb += scaled[..., None] * np.asarray(color, dtype=np.float32)
+    return np.round(np.clip(rgb, 0.0, 1.0) * 255).astype(np.uint8)

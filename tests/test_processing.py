@@ -1,0 +1,121 @@
+"""Tests for the data-independent analysis functions."""
+
+import unittest
+
+import numpy as np
+
+from gradient_analysis.processing import (
+    choose_reference,
+    colorize_scaled,
+    correct_tile,
+    correction_curve,
+    empty_uint16_histogram,
+    fitted_illumination_profile,
+    histogram_percentile_range,
+    image_percentile_range,
+    linear_fit,
+    merge_rgb,
+    position_span,
+    stitch,
+    to_uint16,
+    update_uint16_histogram,
+    x_profile,
+)
+
+
+class ProcessingTests(unittest.TestCase):
+    def test_stitch_and_x_profile(self):
+        left = np.full((3, 2), 2, dtype=np.uint16)
+        right = np.full((3, 2), 6, dtype=np.uint16)
+        result = stitch([left, right])
+        np.testing.assert_array_equal(x_profile(result), [2, 2, 6, 6])
+
+    def test_correction_flattens_parabolic_illumination(self):
+        x = np.linspace(-1, 1, 101)
+        illumination = 100 - 40 * x**2
+        tile = np.repeat(illumination[None, :], 8, axis=0)
+        curve, _ = correction_curve(x_profile(tile), smoothing_window=9)
+        corrected_tile = correct_tile(tile, curve)
+        self.assertEqual(corrected_tile.dtype, np.float32)
+        corrected = x_profile(corrected_tile)
+        self.assertLess(np.std(corrected) / np.mean(corrected), 0.015)
+
+    def test_quadratic_fit_tracks_broad_laser_profile(self):
+        x = np.linspace(-1, 1, 101)
+        illumination = 100 - 35 * x**2
+        noisy = illumination + np.sin(np.arange(101)) * 3
+        fitted, plateau = fitted_illumination_profile(noisy, smoothing_window=9, degree=2)
+        self.assertEqual(fitted.shape, noisy.shape)
+        self.assertGreater(plateau, 80)
+        self.assertLess(np.std((illumination / fitted) / np.mean(illumination / fitted)), 0.04)
+
+    def test_reference_selection_prefers_bright_flat_profile(self):
+        curved = 100 - 30 * np.linspace(-1, 1, 101) ** 2
+        flat = np.full(101, 95.0)
+        dim_flat = np.full(101, 20.0)
+        self.assertEqual(choose_reference([curved, flat, dim_flat], 9), 1)
+
+    def test_merge_has_green_and_magenta_components(self):
+        green = np.arange(16, dtype=float).reshape(4, 4)
+        magenta = np.flip(green, axis=1)
+        result = merge_rgb(
+            [green, magenta],
+            [(0, 1, 0), (1, 0, 1)],
+            [(0, 100), (0, 100)],
+        )
+        self.assertEqual(result.shape, (4, 4, 3))
+        np.testing.assert_array_equal(result[..., 0], result[..., 2])
+
+    def test_colorized_preview_uses_channel_color(self):
+        image = np.array([[0, 50], [100, 150]], dtype=np.uint16)
+        result = colorize_scaled(image, 0, 100, (0.0, 1.0, 0.0))
+        self.assertEqual(result.shape, (2, 2, 3))
+        self.assertTrue(np.all(result[..., 0] == 0))
+        self.assertTrue(np.all(result[..., 2] == 0))
+        self.assertGreater(result[..., 1].max(), 0)
+
+    def test_local_and_global_preview_ranges_can_differ(self):
+        dim = np.array([[0, 5], [10, 15]], dtype=np.uint16)
+        bright = np.array([[0, 500], [1000, 1500]], dtype=np.uint16)
+        local = image_percentile_range(dim, 0, 100)
+        histogram = empty_uint16_histogram()
+        update_uint16_histogram(histogram, dim)
+        update_uint16_histogram(histogram, bright)
+        global_range = histogram_percentile_range(histogram, 0, 100)
+        self.assertEqual(local, (0, 15))
+        self.assertEqual(global_range, (0, 1500))
+
+    def test_bridge_position_span_for_p04(self):
+        self.assertEqual(position_span(3, 2304), (6912, 9216))
+
+    def test_linear_fit_reports_known_slope(self):
+        profile = 4.0 * np.arange(10) + 7.0
+        fit = linear_fit(profile, pixel_size_um=0.5)
+        self.assertAlmostEqual(fit["slope_per_pixel"], 4.0)
+        self.assertAlmostEqual(fit["slope_per_um"], 8.0)
+        self.assertAlmostEqual(fit["intercept"], 7.0)
+        self.assertAlmostEqual(fit["r_squared"], 1.0)
+
+    def test_streaming_histogram_produces_one_global_range(self):
+        histogram = empty_uint16_histogram()
+        update_uint16_histogram(histogram, np.array([[0, 10]], dtype=np.uint16))
+        update_uint16_histogram(histogram, np.array([[20, 30]], dtype=np.uint16))
+        self.assertEqual(histogram_percentile_range(histogram, 0, 100), (0, 30))
+
+    def test_uint16_conversion_rounds_and_reports_clipping(self):
+        values = np.array([[-2.0, 1.4, 2.6, 70_000.0, np.nan]], dtype=np.float32)
+        converted, clipped = to_uint16(values)
+        np.testing.assert_array_equal(converted, [[0, 1, 3, 65_535, 0]])
+        self.assertEqual(converted.dtype, np.uint16)
+        self.assertEqual(clipped, 3)
+
+    def test_concatenated_corrected_profiles_equal_stitched_profile(self):
+        left = np.arange(12, dtype=np.float32).reshape(3, 4)
+        right = left + 20
+        expected = x_profile(stitch([left, right]))
+        actual = np.concatenate([x_profile(left), x_profile(right)])
+        np.testing.assert_allclose(actual, expected)
+
+
+if __name__ == "__main__":
+    unittest.main()

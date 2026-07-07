@@ -1,0 +1,17 @@
+{
+  "z_index": 15,
+  "z_is_one_based": true,
+  "timepoints": [0, 18],
+  "position_x_order": "descending",
+  "reference_positions": {
+    "GFP": null,
+    "Cy5": null
+  },
+  "smoothing_window_px": 101,
+  "trendline_window_px": 201,
+  "correction_fit_degree": 2,
+  "bridge_position": 4,
+  "preview_low_percentile": 1.0,
+  "preview_high_percentile": 99.8,
+  "save_corrected_tiles": true
+}

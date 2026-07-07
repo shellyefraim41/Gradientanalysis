@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.venv/
+.venv_tmp/
+.matplotlib_cache/
+outputs/
+*.nd2
+.pytest_cache/
+.test_outputs/
+tmp*/
