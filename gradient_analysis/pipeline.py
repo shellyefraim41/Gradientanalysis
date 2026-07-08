@@ -13,6 +13,7 @@ from .nd2_source import ND2Source
 from .outputs import (
     save_correction_method_comparison_plot,
     save_color_preview,
+    save_flatfield_2d_comparison_plot,
     save_normalization_plot,
     save_preview,
     save_profile_plot,
@@ -27,6 +28,7 @@ from .outputs import (
 )
 from .processing import (
     correct_tile,
+    correct_tile_2d,
     empty_uint16_histogram,
     fitted_illumination_profile,
     flatten_segments,
@@ -37,6 +39,7 @@ from .processing import (
     physical_x_axes_mm,
     profile_curvature,
     reference_candidate_score,
+    smoothed_illumination_image,
     smoothed_illumination_profile,
     split_equal_width,
     stitch,
@@ -106,6 +109,7 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
     raw_step6 = step6 / "raw_comparison"
     diagnostics_dir = step3 / "reference_selection"
     smoothed_comparison_dir = step3 / "smoothed_profile_comparison"
+    flatfield_2d_comparison_dir = step3 / "flatfield_2d_comparison"
     for folder in (
         step1,
         step2,
@@ -118,6 +122,7 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
         raw_step6,
         diagnostics_dir,
         smoothed_comparison_dir,
+        flatfield_2d_comparison_dir,
     ):
         folder.mkdir(parents=True, exist_ok=False)
 
@@ -135,6 +140,7 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
     raw_slope_records: list[dict[str, float | int | str | None]] = []
     diagnostic_records: list[dict[str, object]] = []
     smoothed_diagnostic_records: list[dict[str, object]] = []
+    flatfield_2d_diagnostic_records: list[dict[str, object]] = []
     local_preview_ranges: dict[str, dict[str, list[int]]] = {"raw": {}, "corrected": {}}
     metadata: dict[str, object] = {}
     base = _safe_stem(source_path.stem)
@@ -174,6 +180,7 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
                     "position_label": p.name,
                     "position_nd2_index": p.index,
                     "profiles": [],
+                    "tiles": [],
                     "mean_intensities": [],
                     "saturated_fractions": [],
                     "timepoints": [],
@@ -198,6 +205,7 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
             "pixel_size_um": source.pixel_size_um,
             "correction_method": "fixed_channel_reference_stable_bright_quadratic_trendline",
             "comparison_correction_method": "fixed_channel_reference_stable_bright_smoothed_profile",
+            "flatfield_2d_comparison_method": "fixed_channel_reference_stable_bright_smoothed_2d_flatfield",
             "correction_formula": (
                 "corrected(y,x) = raw(y,x) * median(fitted_laser_profile) "
                 "/ fitted_laser_profile(x); one fitted_laser_profile per channel"
@@ -205,7 +213,9 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
             "comparison_note": (
                 "Primary corrected TIFFs use the quadratic fitted laser profile. "
                 "step_03_illumination_corrected/smoothed_profile_comparison stores "
-                "diagnostic plots and tables using the smoothed reference profile directly."
+                "diagnostic plots and tables using the smoothed reference profile directly. "
+                "step_03_illumination_corrected/flatfield_2d_comparison stores a "
+                "smoothed 2-D reference-tile flat-field comparison."
             ),
             "correction_fit_degree": config.correction_fit_degree,
             "saturation_fraction_threshold": config.saturation_fraction_threshold,
@@ -233,6 +243,7 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
                     saturated_fraction = float(np.count_nonzero(tile == np.iinfo(np.uint16).max) / tile.size)
                     candidate = reference_candidates[channel.label][i]
                     candidate["profiles"].append(profile.copy())
+                    candidate["tiles"].append(tile.copy())
                     candidate["mean_intensities"].append(mean_intensity)
                     candidate["saturated_fractions"].append(saturated_fraction)
                     candidate["timepoints"].append(t)
@@ -316,6 +327,7 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
             selected = max(scored_candidates, key=lambda item: float(item["score"]))
             best_profile_index = int(selected["best_profile_index"])
             selected_profile = selected["profiles"][best_profile_index]  # type: ignore[index]
+            selected_tile = selected["tiles"][best_profile_index]  # type: ignore[index]
             selected_timepoint = selected["timepoints"][best_profile_index]  # type: ignore[index]
             selected_mean = selected["mean_intensities"][best_profile_index]  # type: ignore[index]
             selected_saturated = selected["saturated_fractions"][best_profile_index]  # type: ignore[index]
@@ -326,6 +338,11 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
             )
             smoothed_laser_profile, smoothed_plateau = smoothed_illumination_profile(
                 selected_profile,  # type: ignore[arg-type]
+                config.smoothing_window_px,
+            )
+            flatfield_2d_map, flatfield_2d_plateau = smoothed_illumination_image(
+                selected_tile,  # type: ignore[arg-type]
+                config.smoothing_window_px,
                 config.smoothing_window_px,
             )
             fixed_corrections[channel.label] = {
@@ -346,6 +363,8 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
                 "smoothed_profile_plateau": smoothed_plateau,
                 "smoothed_fitted_laser_profile": smoothed_laser_profile,
                 "smoothed_profile_curve": smoothed_plateau / smoothed_laser_profile,
+                "flatfield_2d_plateau": flatfield_2d_plateau,
+                "flatfield_2d_map": flatfield_2d_map,
             }
             save_reference_selection_plot(
                 diagnostics_dir / f"{base}_z{config.z_index:02d}_{channel.label}_selected_reference_shapes.png",
@@ -369,6 +388,7 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
                     "curve",
                     "smoothed_fitted_laser_profile",
                     "smoothed_profile_curve",
+                    "flatfield_2d_map",
                 }
             }
             for label, details in fixed_corrections.items()
@@ -388,10 +408,17 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
                 smoothed_curve = fixed_corrections[channel.label]["smoothed_profile_curve"]
                 smoothed_laser_profile = fixed_corrections[channel.label]["smoothed_fitted_laser_profile"]
                 smoothed_plateau = float(fixed_corrections[channel.label]["smoothed_profile_plateau"])
+                flatfield_2d_map = fixed_corrections[channel.label]["flatfield_2d_map"]
+                flatfield_2d_plateau = float(fixed_corrections[channel.label]["flatfield_2d_plateau"])
                 corrected = [correct_tile(tile, curve) for tile in tiles]  # type: ignore[arg-type]
                 corrected_profiles = [x_profile(tile) for tile in corrected]
                 smoothed_corrected = [correct_tile(tile, smoothed_curve) for tile in tiles]  # type: ignore[arg-type]
                 smoothed_corrected_profiles = [x_profile(tile) for tile in smoothed_corrected]
+                flatfield_2d_corrected = [
+                    correct_tile_2d(tile, flatfield_2d_map, flatfield_2d_plateau)  # type: ignore[arg-type]
+                    for tile in tiles
+                ]
+                flatfield_2d_corrected_profiles = [x_profile(tile) for tile in flatfield_2d_corrected]
                 corrected_segments = [
                     (axis, profile) for axis, profile in zip(x_axes_mm, corrected_profiles)
                 ]
@@ -435,11 +462,29 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
                     slope_start_index,
                     slope_end_index,
                 )
+                _, flatfield_2d_fit_y = flatten_segments(
+                    x_axes_mm,
+                    flatfield_2d_corrected_profiles,
+                    slope_start_index,
+                    slope_end_index,
+                )
                 smoothed_slope_record = _slope_record(
                     timepoint=t,
                     channel_label=channel.label,
                     x_axes_mm=x_axes_mm,
                     profiles=smoothed_corrected_profiles,
+                    slope_start_index=slope_start_index,
+                    slope_end_index=slope_end_index,
+                    start_position_label=source.positions[slope_start_index].name,
+                    end_position_label=source.positions[slope_end_index].name,
+                    slope_start_position=config.slope_start_position,
+                    slope_end_position=config.slope_end_position,
+                )
+                flatfield_2d_slope_record = _slope_record(
+                    timepoint=t,
+                    channel_label=channel.label,
+                    x_axes_mm=x_axes_mm,
+                    profiles=flatfield_2d_corrected_profiles,
                     slope_start_index=slope_start_index,
                     slope_end_index=slope_end_index,
                     start_position_label=source.positions[slope_start_index].name,
@@ -479,6 +524,24 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
                         "reference_selection_score": fixed_ref["reference_selection_score"],
                     }
                 )
+                flatfield_2d_diagnostic_records.append(
+                    {
+                        "timepoint": t,
+                        "channel": channel.label,
+                        "raw_slope_au_per_mm": raw_record["slope_au_per_mm"],
+                        "quadratic_slope_au_per_mm": slope_record["slope_au_per_mm"],
+                        "smoothed_profile_slope_au_per_mm": smoothed_slope_record["slope_au_per_mm"],
+                        "flatfield_2d_slope_au_per_mm": flatfield_2d_slope_record["slope_au_per_mm"],
+                        "raw_curvature": profile_curvature(raw_fit_y, config.trendline_window_px),
+                        "quadratic_curvature": profile_curvature(corrected_fit_y, config.trendline_window_px),
+                        "smoothed_profile_curvature": profile_curvature(smoothed_fit_y, config.trendline_window_px),
+                        "flatfield_2d_curvature": profile_curvature(flatfield_2d_fit_y, config.trendline_window_px),
+                        "reference_position_label": fixed_ref["position_label"],
+                        "reference_timepoint": fixed_ref["timepoint"],
+                        "flatfield_2d_plateau": flatfield_2d_plateau,
+                        "reference_selection_score": fixed_ref["reference_selection_score"],
+                    }
+                )
 
                 converted_tiles: list[np.ndarray] = []
                 clipped_pixels = 0
@@ -492,6 +555,8 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
                 channel_dir.mkdir(parents=True, exist_ok=True)
                 comparison_channel_dir = smoothed_comparison_dir / f"t{t:03d}" / channel.label
                 comparison_channel_dir.mkdir(parents=True, exist_ok=True)
+                flatfield_2d_channel_dir = flatfield_2d_comparison_dir / f"t{t:03d}" / channel.label
+                flatfield_2d_channel_dir.mkdir(parents=True, exist_ok=True)
                 if config.save_corrected_tiles:
                     for position, tile in zip(source.positions, converted_tiles):
                         save_tiff(
@@ -543,6 +608,24 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
                         f"t{int(fixed_ref['timepoint']):03d} {fixed_ref['position_label']}"
                     ),
                 )
+                save_flatfield_2d_comparison_plot(
+                    flatfield_2d_channel_dir
+                    / f"{base}_t{t:03d}_z{config.z_index:02d}_{channel.label}_1d-vs-2d-flatfield.png",
+                    local_profiles,
+                    corrected_profiles,
+                    smoothed_corrected_profiles,
+                    flatfield_2d_corrected_profiles,
+                    fitted_laser_profile,  # type: ignore[arg-type]
+                    smoothed_laser_profile,  # type: ignore[arg-type]
+                    flatfield_2d_map,  # type: ignore[arg-type]
+                    ref_index,
+                    [p.name for p in source.positions],
+                    channel,
+                    (
+                        f"{source_path.name} - t={t}, {channel.label}; fixed ref="
+                        f"t{int(fixed_ref['timepoint']):03d} {fixed_ref['position_label']}"
+                    ),
+                )
                 write_json(
                     channel_dir / "normalization_details.json",
                     {
@@ -565,6 +648,12 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
                         "smoothed_profile_note": (
                             "Diagnostic only: uses smooth_profile(reference_profile) directly "
                             "as the fitted laser profile, with the same median-preserving correction formula."
+                        ),
+                        "flatfield_2d_comparison_method": "fixed_channel_reference_stable_bright_smoothed_2d_flatfield",
+                        "flatfield_2d_plateau": flatfield_2d_plateau,
+                        "flatfield_2d_note": (
+                            "Diagnostic only: uses a smoothed 2-D selected reference tile "
+                            "as the fitted illumination map, with the same median-preserving correction formula."
                         ),
                         "corrected_tiff_dtype": "uint16",
                         "rounded_or_clipped_range": [0, 65535],
@@ -712,6 +801,14 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
         write_json(
             smoothed_comparison_dir / "quadratic_vs_smoothed_profile_diagnostics.json",
             smoothed_diagnostic_records,
+        )
+        write_rows_csv(
+            flatfield_2d_comparison_dir / "quadratic_vs_smoothed_profile_vs_2d_flatfield_diagnostics.csv",
+            flatfield_2d_diagnostic_records,
+        )
+        write_json(
+            flatfield_2d_comparison_dir / "quadratic_vs_smoothed_profile_vs_2d_flatfield_diagnostics.json",
+            flatfield_2d_diagnostic_records,
         )
         write_csv(step6 / f"{base}_z{config.z_index:02d}_P01-P06_slopes.csv", slope_records)
         write_json(step6 / f"{base}_z{config.z_index:02d}_P01-P06_slopes.json", slope_records)

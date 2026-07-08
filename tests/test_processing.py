@@ -8,6 +8,7 @@ from gradient_analysis.processing import (
     choose_reference,
     colorize_scaled,
     correct_tile,
+    correct_tile_2d,
     correction_curve,
     empty_uint16_histogram,
     fitted_illumination_profile,
@@ -21,7 +22,9 @@ from gradient_analysis.processing import (
     profile_curvature,
     reference_candidate_score,
     position_span,
+    smoothed_illumination_image,
     smoothed_illumination_profile,
+    smooth_image,
     split_equal_width,
     stitch,
     to_uint16,
@@ -72,6 +75,27 @@ class ProcessingTests(unittest.TestCase):
         smoothed_variation = np.std(smoothed_corrected) / np.mean(smoothed_corrected)
         self.assertLess(quadratic_variation, raw_variation)
         self.assertLess(smoothed_variation, quadratic_variation)
+
+    def test_2d_flatfield_correction_flattens_y_and_x_illumination(self):
+        y = np.linspace(-1, 1, 61)[:, None]
+        x = np.linspace(-1, 1, 81)[None, :]
+        illumination = 100 - 18 * x**2 - 12 * y**2
+        illumination[:, :8] *= np.linspace(0.5, 1.0, 8)
+        illumination[:8, :] *= np.linspace(0.7, 1.0, 8)[:, None]
+        one_d_profile = x_profile(illumination)
+        one_d_fit, one_d_plateau = smoothed_illumination_profile(one_d_profile, 9)
+        one_d_corrected = correct_tile(illumination, one_d_plateau / one_d_fit)
+        fitted, plateau = smoothed_illumination_image(illumination, 9, 9)
+        corrected = correct_tile_2d(illumination, fitted, plateau)
+        raw_variation = np.std(illumination) / np.mean(illumination)
+        one_d_variation = np.std(one_d_corrected) / np.mean(one_d_corrected)
+        two_d_variation = np.std(corrected) / np.mean(corrected)
+        self.assertLess(one_d_variation, raw_variation)
+        self.assertLess(two_d_variation, one_d_variation)
+
+    def test_smooth_image_rejects_non_2d_inputs(self):
+        with self.assertRaises(ValueError):
+            smooth_image(np.arange(5), 3, 3)
 
     def test_reference_selection_prefers_bright_flat_profile(self):
         curved = 100 - 30 * np.linspace(-1, 1, 101) ** 2

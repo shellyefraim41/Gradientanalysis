@@ -81,6 +81,29 @@ def smooth_profile(profile: np.ndarray, window: int) -> np.ndarray:
     return np.convolve(padded, np.ones(window) / window, mode="valid")
 
 
+def smooth_image(image: np.ndarray, window_y: int, window_x: int) -> np.ndarray:
+    """Smooth a 2-D image with reflected separable moving averages."""
+    if image.ndim != 2:
+        raise ValueError("Only 2-D images can be smoothed.")
+    smoothed = image.astype(np.float64, copy=False)
+    for axis, requested_window in ((0, window_y), (1, window_x)):
+        size = smoothed.shape[axis]
+        if size < 3:
+            continue
+        window = max(3, min(int(requested_window), int(size)))
+        if window % 2 == 0:
+            window -= 1
+        pad = window // 2
+        padded = np.pad(
+            smoothed,
+            ((pad, pad), (0, 0)) if axis == 0 else ((0, 0), (pad, pad)),
+            mode="reflect",
+        )
+        kernel = np.ones(window, dtype=np.float64) / window
+        smoothed = np.apply_along_axis(lambda values: np.convolve(values, kernel, mode="valid"), axis, padded)
+    return smoothed
+
+
 def fitted_illumination_profile(
     reference_profile: np.ndarray,
     smoothing_window: int,
@@ -105,6 +128,19 @@ def smoothed_illumination_profile(
 ) -> tuple[np.ndarray, float]:
     """Use the smoothed reference x-profile directly as the illumination profile."""
     fitted = smooth_profile(reference_profile, smoothing_window)
+    plateau = float(np.median(fitted))
+    floor = max(plateau * 0.05, np.finfo(float).eps)
+    fitted = np.maximum(fitted, floor)
+    return fitted.astype(np.float64), plateau
+
+
+def smoothed_illumination_image(
+    reference_tile: np.ndarray,
+    smoothing_window_y: int,
+    smoothing_window_x: int,
+) -> tuple[np.ndarray, float]:
+    """Use a smoothed 2-D reference tile directly as the illumination map."""
+    fitted = smooth_image(reference_tile, smoothing_window_y, smoothing_window_x)
     plateau = float(np.median(fitted))
     floor = max(plateau * 0.05, np.finfo(float).eps)
     fitted = np.maximum(fitted, floor)
@@ -192,6 +228,14 @@ def correct_tile(tile: np.ndarray, curve: np.ndarray) -> np.ndarray:
     if tile.shape[1] != curve.size:
         raise ValueError("Correction curve width does not match tile width.")
     return tile.astype(np.float32) * curve.astype(np.float32)[np.newaxis, :]
+
+
+def correct_tile_2d(tile: np.ndarray, illumination_map: np.ndarray, plateau: float) -> np.ndarray:
+    """Apply a 2-D illumination correction and preserve floating precision."""
+    if tile.shape != illumination_map.shape:
+        raise ValueError("2-D illumination map shape does not match tile shape.")
+    curve = float(plateau) / illumination_map.astype(np.float32)
+    return tile.astype(np.float32) * curve
 
 
 def to_uint16(image: np.ndarray) -> tuple[np.ndarray, int]:

@@ -382,6 +382,67 @@ def save_correction_method_comparison_plot(
     plt.close(fig)
 
 
+def save_flatfield_2d_comparison_plot(
+    path: Path,
+    raw_profiles: list[np.ndarray],
+    quadratic_profiles: list[np.ndarray],
+    smoothed_1d_profiles: list[np.ndarray],
+    flatfield_2d_profiles: list[np.ndarray],
+    quadratic_laser_profile: np.ndarray,
+    smoothed_1d_laser_profile: np.ndarray,
+    flatfield_2d_map: np.ndarray,
+    reference_list_index: int,
+    position_labels: list[str],
+    channel: ChannelConfig,
+    title: str,
+) -> None:
+    """Compare 1-D and 2-D illumination correction methods on local x profiles."""
+    fig, axes = plt.subplots(4, 1, figsize=(12, 15), constrained_layout=True)
+    for i, (raw, quadratic, smoothed_1d, flatfield_2d) in enumerate(
+        zip(raw_profiles, quadratic_profiles, smoothed_1d_profiles, flatfield_2d_profiles)
+    ):
+        suffix = " (reference)" if i == reference_list_index else ""
+        label = position_labels[i] + suffix
+        axes[0].plot(raw, label=label, alpha=0.85)
+        axes[1].plot(quadratic, label=label, alpha=0.85)
+        axes[2].plot(smoothed_1d, label=label, alpha=0.85)
+        axes[3].plot(flatfield_2d, label=label, alpha=0.85)
+    axes[0].plot(
+        quadratic_laser_profile,
+        color="black",
+        linestyle="--",
+        linewidth=2.0,
+        label="quadratic fitted laser profile",
+    )
+    axes[0].plot(
+        smoothed_1d_laser_profile,
+        color=channel.plot_color,
+        linestyle=":",
+        linewidth=2.0,
+        label="smoothed 1-D fitted laser profile",
+    )
+    axes[0].plot(
+        np.mean(flatfield_2d_map, axis=0),
+        color="tab:orange",
+        linestyle="-.",
+        linewidth=2.0,
+        label="2-D flat-field x mean",
+    )
+    axes[0].set(title=f"{title} - raw local-x profiles", ylabel="Mean intensity (a.u.)")
+    axes[1].set(title="After quadratic 1-D correction", ylabel="Corrected mean intensity")
+    axes[2].set(title="After smoothed-profile 1-D correction", ylabel="Corrected mean intensity")
+    axes[3].set(
+        title="After smoothed 2-D flat-field correction",
+        xlabel="Local x coordinate (pixels)",
+        ylabel="Corrected mean intensity",
+    )
+    for ax in axes:
+        ax.grid(alpha=0.2)
+        ax.legend(ncol=4, fontsize=8)
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+
+
 def write_rows_csv(path: Path, rows: list[dict[str, object]]) -> None:
     """Write a generic table using the keys from the first row."""
     path.parent.mkdir(parents=True, exist_ok=True)
