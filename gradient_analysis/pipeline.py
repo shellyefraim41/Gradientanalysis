@@ -14,9 +14,11 @@ from .outputs import (
     save_correction_method_comparison_plot,
     save_color_preview,
     save_flatfield_2d_comparison_plot,
+    save_max_difference_plot,
     save_normalization_plot,
     save_preview,
     save_profile_plot,
+    save_position_gaussian_step_plot,
     save_reference_selection_plot,
     save_rgb,
     save_slope_timecourse_plot,
@@ -29,9 +31,11 @@ from .outputs import (
 from .processing import (
     correct_tile,
     correct_tile_2d,
+    correct_tile_with_background_filter,
     empty_uint16_histogram,
     fitted_illumination_profile,
     flatten_segments,
+    gaussian_correction_filter_from_images,
     histogram_percentile_range,
     image_percentile_range,
     linear_fit_xy,
@@ -41,6 +45,7 @@ from .processing import (
     reference_candidate_score,
     smoothed_illumination_image,
     smoothed_illumination_profile,
+    subtract_background_floor,
     split_equal_width,
     stitch,
     to_uint16,
@@ -93,6 +98,41 @@ def _slope_record(
     }
 
 
+def _position_max_difference_record(
+    *,
+    timepoint: int,
+    channel_label: str,
+    p02_tile: np.ndarray,
+    p05_tile: np.ndarray,
+    background: float,
+) -> dict[str, object]:
+    """Compare raw maxima in P02/P05 with channel-specific sign direction."""
+    p02_max = float(np.max(p02_tile))
+    p05_max = float(np.max(p05_tile))
+    p02_bg_max = float(np.max(subtract_background_floor(p02_tile, background)))
+    p05_bg_max = float(np.max(subtract_background_floor(p05_tile, background)))
+    if channel_label == "Cy5":
+        formula = "max_intensity(P05)-max_intensity(P02)"
+        raw_difference = p05_max - p02_max
+        bg_difference = p05_bg_max - p02_bg_max
+    else:
+        formula = "max_intensity(P02)-max_intensity(P05)"
+        raw_difference = p02_max - p05_max
+        bg_difference = p02_bg_max - p05_bg_max
+    return {
+        "timepoint": timepoint,
+        "channel": channel_label,
+        "formula": formula,
+        "p02_max_raw": p02_max,
+        "p05_max_raw": p05_max,
+        "difference_raw": raw_difference,
+        "p02_max_background_subtracted": p02_bg_max,
+        "p05_max_background_subtracted": p05_bg_max,
+        "difference_background_subtracted": bg_difference,
+        "background_subtracted": background,
+    }
+
+
 def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: AnalysisConfig) -> Path:
     """Run all requested steps and return the newly created run directory."""
     source_path = Path(nd2_path)
@@ -104,12 +144,14 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
     step4 = run_dir / "step_04_timecourse_profiles"
     step5 = run_dir / "step_05_corrected_x_profiles"
     step6 = run_dir / "step_06_gradient_slopes"
+    step7 = run_dir / "step_07_max_intensity_differences"
     raw_step4 = step4 / "raw_comparison"
     raw_step5 = step5 / "raw_comparison"
     raw_step6 = step6 / "raw_comparison"
     diagnostics_dir = step3 / "reference_selection"
     smoothed_comparison_dir = step3 / "smoothed_profile_comparison"
     flatfield_2d_comparison_dir = step3 / "flatfield_2d_comparison"
+    position_gaussian_dir = step3 / "position_gaussian_bg100_comparison"
     for folder in (
         step1,
         step2,
@@ -117,12 +159,14 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
         step4,
         step5,
         step6,
+        step7,
         raw_step4,
         raw_step5,
         raw_step6,
         diagnostics_dir,
         smoothed_comparison_dir,
         flatfield_2d_comparison_dir,
+        position_gaussian_dir,
     ):
         folder.mkdir(parents=True, exist_ok=False)
 
@@ -141,6 +185,8 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
     diagnostic_records: list[dict[str, object]] = []
     smoothed_diagnostic_records: list[dict[str, object]] = []
     flatfield_2d_diagnostic_records: list[dict[str, object]] = []
+    position_gaussian_diagnostic_records: list[dict[str, object]] = []
+    max_difference_records: list[dict[str, object]] = []
     local_preview_ranges: dict[str, dict[str, list[int]]] = {"raw": {}, "corrected": {}}
     metadata: dict[str, object] = {}
     base = _safe_stem(source_path.stem)
@@ -206,18 +252,34 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
             "correction_method": "fixed_channel_reference_stable_bright_quadratic_trendline",
             "comparison_correction_method": "fixed_channel_reference_stable_bright_smoothed_profile",
             "flatfield_2d_comparison_method": "fixed_channel_reference_stable_bright_smoothed_2d_flatfield",
+            "position_gaussian_bg100_comparison_method": "fixed_position_time_stack_gaussian_flatfield_after_background_subtraction",
             "correction_formula": (
                 "corrected(y,x) = raw(y,x) * median(fitted_laser_profile) "
                 "/ fitted_laser_profile(x); one fitted_laser_profile per channel"
+            ),
+            "position_gaussian_bg100_formula": (
+                "corrected(y,x) = max(raw(y,x) - microscope_background, 0) "
+                "* clipped(median(gaussian_smoothed_reference_stack) / gaussian_smoothed_reference_stack(y,x))"
             ),
             "comparison_note": (
                 "Primary corrected TIFFs use the quadratic fitted laser profile. "
                 "step_03_illumination_corrected/smoothed_profile_comparison stores "
                 "diagnostic plots and tables using the smoothed reference profile directly. "
                 "step_03_illumination_corrected/flatfield_2d_comparison stores a "
-                "smoothed 2-D reference-tile flat-field comparison."
+                "smoothed 2-D reference-tile flat-field comparison. "
+                "step_03_illumination_corrected/position_gaussian_bg100_comparison stores "
+                "a diagnostic ImageAnalysis-style Gaussian flat-field comparison built "
+                "from GFP P02 and Cy5 P06 over the selected timepoints after subtracting "
+                "the microscope background."
             ),
             "correction_fit_degree": config.correction_fit_degree,
+            "microscope_background": config.microscope_background,
+            "position_gaussian_references": config.position_gaussian_references,
+            "position_gaussian_sigma_px": config.position_gaussian_sigma_px,
+            "position_gaussian_clip": [
+                config.position_gaussian_clip_min,
+                config.position_gaussian_clip_max,
+            ],
             "saturation_fraction_threshold": config.saturation_fraction_threshold,
             "slope_start_position": source.positions[slope_start_index].name,
             "slope_end_position": source.positions[slope_end_index].name,
@@ -225,6 +287,7 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
             "step_04_values": "corrected measured x profiles on physical mm axis with P01-P06 slope table; raw_comparison contains the same raw analysis",
             "step_05_values": "corrected measured x profiles per timepoint on physical mm axis; raw_comparison contains the same raw analysis",
             "step_06_values": "linear slopes fitted to corrected measured pixels from P01 through P06; raw_comparison contains raw slopes",
+            "step_07_values": "raw max-intensity difference between P02 and P05 over time; GFP uses P02-P05 and Cy5 uses P05-P02",
         }
 
         # Pass 1: read the ND2 once, save raw contact-sheet images, make raw
@@ -266,6 +329,16 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
                 )
                 raw_slope_records.append(raw_slope_record)
                 raw_gradient_fits_for_t[channel.label] = raw_slope_record
+                if len(tiles) >= 5:
+                    max_difference_records.append(
+                        _position_max_difference_record(
+                            timepoint=t,
+                            channel_label=channel.label,
+                            p02_tile=tiles[1],
+                            p05_tile=tiles[4],
+                            background=config.microscope_background,
+                        )
+                    )
                 large = stitch(tiles)
                 prefix = f"{base}_t{t:03d}_z{config.z_index:02d}_{channel.label}_positions_left-to-right"
                 tiff_path = _timepoint_folder(step1, t) / f"{prefix}.tif"
@@ -394,6 +467,56 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
             for label, details in fixed_corrections.items()
         }
 
+        position_gaussian_filters: dict[str, dict[str, object]] = {}
+        for channel in config.channels:
+            reference_one_based = int(config.position_gaussian_references.get(channel.label, 1))
+            reference_index = reference_one_based - 1
+            if not 0 <= reference_index < len(source.positions):
+                raise ValueError(
+                    f"Position Gaussian reference for {channel.label} must fall within "
+                    f"1-{len(source.positions)}; received {reference_one_based}."
+                )
+            reference_tiles: list[np.ndarray] = []
+            for t in source.timepoints:
+                raw_large = tifffile.imread(raw_tiff_paths[channel.label][t])
+                reference_tiles.append(split_equal_width(raw_large, len(source.positions))[reference_index])
+            reference_stack = np.stack(reference_tiles)
+            correction_filter, blurred_mean, reference, resolved_sigma = gaussian_correction_filter_from_images(
+                reference_stack,
+                sigma=config.position_gaussian_sigma_px,
+                background=config.microscope_background,
+                clip_min=config.position_gaussian_clip_min,
+                clip_max=config.position_gaussian_clip_max,
+            )
+            background_subtracted_mean = np.mean(
+                np.stack([subtract_background_floor(tile, config.microscope_background) for tile in reference_tiles]),
+                axis=0,
+                dtype=np.float64,
+            ).astype(np.float32)
+            position_gaussian_filters[channel.label] = {
+                "reference_position_one_based": reference_one_based,
+                "reference_position_list_index": reference_index,
+                "reference_position_label": source.positions[reference_index].name,
+                "reference_position_nd2_index": source.positions[reference_index].index,
+                "correction_filter": correction_filter,
+                "blurred_mean": blurred_mean,
+                "background_subtracted_mean": background_subtracted_mean,
+                "reference": reference,
+                "sigma_px": resolved_sigma,
+                "clip_min": config.position_gaussian_clip_min,
+                "clip_max": config.position_gaussian_clip_max,
+                "background": config.microscope_background,
+                "timepoints": list(source.timepoints),
+            }
+        metadata["position_gaussian_bg100_references"] = {
+            label: {
+                k: v
+                for k, v in details.items()
+                if k not in {"correction_filter", "blurred_mean", "background_subtracted_mean"}
+            }
+            for label, details in position_gaussian_filters.items()
+        }
+
         # Pass 2: apply fixed per-channel correction to raw TIFF contact sheets.
         for t in source.timepoints:
             gradient_fits_for_t: dict[str, dict[str, float | int | str | None]] = {}
@@ -410,6 +533,17 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
                 smoothed_plateau = float(fixed_corrections[channel.label]["smoothed_profile_plateau"])
                 flatfield_2d_map = fixed_corrections[channel.label]["flatfield_2d_map"]
                 flatfield_2d_plateau = float(fixed_corrections[channel.label]["flatfield_2d_plateau"])
+                position_gaussian = position_gaussian_filters[channel.label]
+                position_gaussian_filter = position_gaussian["correction_filter"]
+                position_gaussian_corrected = [
+                    correct_tile_with_background_filter(
+                        tile,
+                        position_gaussian_filter,  # type: ignore[arg-type]
+                        config.microscope_background,
+                    )
+                    for tile in tiles
+                ]
+                position_gaussian_profiles = [x_profile(tile) for tile in position_gaussian_corrected]
                 corrected = [correct_tile(tile, curve) for tile in tiles]  # type: ignore[arg-type]
                 corrected_profiles = [x_profile(tile) for tile in corrected]
                 smoothed_corrected = [correct_tile(tile, smoothed_curve) for tile in tiles]  # type: ignore[arg-type]
@@ -468,6 +602,12 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
                     slope_start_index,
                     slope_end_index,
                 )
+                _, position_gaussian_fit_y = flatten_segments(
+                    x_axes_mm,
+                    position_gaussian_profiles,
+                    slope_start_index,
+                    slope_end_index,
+                )
                 smoothed_slope_record = _slope_record(
                     timepoint=t,
                     channel_label=channel.label,
@@ -485,6 +625,18 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
                     channel_label=channel.label,
                     x_axes_mm=x_axes_mm,
                     profiles=flatfield_2d_corrected_profiles,
+                    slope_start_index=slope_start_index,
+                    slope_end_index=slope_end_index,
+                    start_position_label=source.positions[slope_start_index].name,
+                    end_position_label=source.positions[slope_end_index].name,
+                    slope_start_position=config.slope_start_position,
+                    slope_end_position=config.slope_end_position,
+                )
+                position_gaussian_slope_record = _slope_record(
+                    timepoint=t,
+                    channel_label=channel.label,
+                    x_axes_mm=x_axes_mm,
+                    profiles=position_gaussian_profiles,
                     slope_start_index=slope_start_index,
                     slope_end_index=slope_end_index,
                     start_position_label=source.positions[slope_start_index].name,
@@ -542,6 +694,35 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
                         "reference_selection_score": fixed_ref["reference_selection_score"],
                     }
                 )
+                position_gaussian_diagnostic_records.append(
+                    {
+                        "timepoint": t,
+                        "channel": channel.label,
+                        "raw_slope_au_per_mm": raw_record["slope_au_per_mm"],
+                        "quadratic_slope_au_per_mm": slope_record["slope_au_per_mm"],
+                        "smoothed_profile_slope_au_per_mm": smoothed_slope_record["slope_au_per_mm"],
+                        "flatfield_2d_slope_au_per_mm": flatfield_2d_slope_record["slope_au_per_mm"],
+                        "position_gaussian_bg100_slope_au_per_mm": position_gaussian_slope_record[
+                            "slope_au_per_mm"
+                        ],
+                        "raw_curvature": profile_curvature(raw_fit_y, config.trendline_window_px),
+                        "quadratic_curvature": profile_curvature(corrected_fit_y, config.trendline_window_px),
+                        "smoothed_profile_curvature": profile_curvature(smoothed_fit_y, config.trendline_window_px),
+                        "flatfield_2d_curvature": profile_curvature(flatfield_2d_fit_y, config.trendline_window_px),
+                        "position_gaussian_bg100_curvature": profile_curvature(
+                            position_gaussian_fit_y,
+                            config.trendline_window_px,
+                        ),
+                        "reference_position_label": position_gaussian["reference_position_label"],
+                        "reference_position_one_based": position_gaussian["reference_position_one_based"],
+                        "reference_timepoints": "all selected",
+                        "background_subtracted": position_gaussian["background"],
+                        "gaussian_sigma_px": position_gaussian["sigma_px"],
+                        "gaussian_reference": position_gaussian["reference"],
+                        "clip_min": position_gaussian["clip_min"],
+                        "clip_max": position_gaussian["clip_max"],
+                    }
+                )
 
                 converted_tiles: list[np.ndarray] = []
                 clipped_pixels = 0
@@ -557,6 +738,19 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
                 comparison_channel_dir.mkdir(parents=True, exist_ok=True)
                 flatfield_2d_channel_dir = flatfield_2d_comparison_dir / f"t{t:03d}" / channel.label
                 flatfield_2d_channel_dir.mkdir(parents=True, exist_ok=True)
+                position_gaussian_channel_dir = position_gaussian_dir / f"t{t:03d}" / channel.label
+                position_gaussian_channel_dir.mkdir(parents=True, exist_ok=True)
+                position_gaussian_tiles_uint16: list[np.ndarray] = []
+                position_gaussian_clipped_pixels = 0
+                for tile in position_gaussian_corrected:
+                    converted, clipped = to_uint16(tile)
+                    position_gaussian_tiles_uint16.append(converted)
+                    position_gaussian_clipped_pixels += clipped
+                save_tiff(
+                    position_gaussian_channel_dir
+                    / f"{base}_t{t:03d}_z{config.z_index:02d}_{channel.label}_position-gaussian-bg100_contact-sheet.tif",
+                    stitch(position_gaussian_tiles_uint16),
+                )
                 if config.save_corrected_tiles:
                     for position, tile in zip(source.positions, converted_tiles):
                         save_tiff(
@@ -626,6 +820,32 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
                         f"t{int(fixed_ref['timepoint']):03d} {fixed_ref['position_label']}"
                     ),
                 )
+                gaussian_ref_index = int(position_gaussian["reference_position_list_index"])
+                save_position_gaussian_step_plot(
+                    position_gaussian_channel_dir
+                    / f"{base}_t{t:03d}_z{config.z_index:02d}_{channel.label}_position-gaussian-bg100_steps.png",
+                    raw_profile=local_profiles[gaussian_ref_index],
+                    background_subtracted_profile=x_profile(
+                        subtract_background_floor(tiles[gaussian_ref_index], config.microscope_background)
+                    ),
+                    quadratic_profile=corrected_profiles[gaussian_ref_index],
+                    position_gaussian_profile=position_gaussian_profiles[gaussian_ref_index],
+                    gaussian_reference_mean_profile=x_profile(
+                        position_gaussian["background_subtracted_mean"]  # type: ignore[arg-type]
+                    ),
+                    gaussian_blurred_mean_profile=x_profile(
+                        position_gaussian["blurred_mean"]  # type: ignore[arg-type]
+                    ),
+                    gaussian_filter_profile=x_profile(
+                        position_gaussian["correction_filter"]  # type: ignore[arg-type]
+                    ),
+                    position_label=str(position_gaussian["reference_position_label"]),
+                    channel=channel,
+                    title=(
+                        f"{source_path.name} - t={t}, {channel.label}; fixed Gaussian ref="
+                        f"{position_gaussian['reference_position_label']}"
+                    ),
+                )
                 write_json(
                     channel_dir / "normalization_details.json",
                     {
@@ -654,6 +874,28 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
                         "flatfield_2d_note": (
                             "Diagnostic only: uses a smoothed 2-D selected reference tile "
                             "as the fitted illumination map, with the same median-preserving correction formula."
+                        ),
+                        "position_gaussian_bg100_comparison_method": (
+                            "fixed_position_time_stack_gaussian_flatfield_after_background_subtraction"
+                        ),
+                        "position_gaussian_reference_position_label": position_gaussian[
+                            "reference_position_label"
+                        ],
+                        "position_gaussian_reference_position_one_based": position_gaussian[
+                            "reference_position_one_based"
+                        ],
+                        "position_gaussian_background_subtracted": position_gaussian["background"],
+                        "position_gaussian_sigma_px": position_gaussian["sigma_px"],
+                        "position_gaussian_clip": [
+                            position_gaussian["clip_min"],
+                            position_gaussian["clip_max"],
+                        ],
+                        "position_gaussian_corrected_tiff_dtype": "uint16",
+                        "position_gaussian_clipped_pixel_count": position_gaussian_clipped_pixels,
+                        "position_gaussian_note": (
+                            "Diagnostic only: subtracts the microscope background, floors negative "
+                            "values at zero, builds one Gaussian 2-D filter from the fixed position "
+                            "over selected timepoints, and applies it without adding the background back."
                         ),
                         "corrected_tiff_dtype": "uint16",
                         "rounded_or_clipped_range": [0, 65535],
@@ -790,8 +1032,16 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
                 channel,
                 f"{source_path.name} - {channel.label}, raw P01-P06 slope",
             )
+            save_max_difference_plot(
+                step7 / f"{base}_z{config.z_index:02d}_{channel.label}_P02-P05_raw_max_difference_over_time.png",
+                max_difference_records,
+                channel,
+                f"{source_path.name} - {channel.label}, raw P02/P05 max-intensity difference",
+            )
         write_csv(raw_step6 / f"{base}_z{config.z_index:02d}_P01-P06_raw_slopes.csv", raw_slope_records)
         write_json(raw_step6 / f"{base}_z{config.z_index:02d}_P01-P06_raw_slopes.json", raw_slope_records)
+        write_rows_csv(step7 / f"{base}_z{config.z_index:02d}_P02-P05_raw_max_differences.csv", max_difference_records)
+        write_json(step7 / f"{base}_z{config.z_index:02d}_P02-P05_raw_max_differences.json", max_difference_records)
         write_rows_csv(step6 / "raw_vs_corrected_diagnostics.csv", diagnostic_records)
         write_json(step6 / "raw_vs_corrected_diagnostics.json", diagnostic_records)
         write_rows_csv(
@@ -809,6 +1059,16 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
         write_json(
             flatfield_2d_comparison_dir / "quadratic_vs_smoothed_profile_vs_2d_flatfield_diagnostics.json",
             flatfield_2d_diagnostic_records,
+        )
+        write_rows_csv(
+            position_gaussian_dir
+            / "quadratic_vs_smoothed_profile_vs_2d_flatfield_vs_position_gaussian_bg100_diagnostics.csv",
+            position_gaussian_diagnostic_records,
+        )
+        write_json(
+            position_gaussian_dir
+            / "quadratic_vs_smoothed_profile_vs_2d_flatfield_vs_position_gaussian_bg100_diagnostics.json",
+            position_gaussian_diagnostic_records,
         )
         write_csv(step6 / f"{base}_z{config.z_index:02d}_P01-P06_slopes.csv", slope_records)
         write_json(step6 / f"{base}_z{config.z_index:02d}_P01-P06_slopes.json", slope_records)

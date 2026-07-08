@@ -9,9 +9,12 @@ from gradient_analysis.processing import (
     colorize_scaled,
     correct_tile,
     correct_tile_2d,
+    correct_tile_with_background_filter,
     correction_curve,
     empty_uint16_histogram,
     fitted_illumination_profile,
+    gaussian_correction_filter_from_images,
+    gaussian_smooth_image,
     histogram_percentile_range,
     image_percentile_range,
     linear_fit,
@@ -24,6 +27,7 @@ from gradient_analysis.processing import (
     position_span,
     smoothed_illumination_image,
     smoothed_illumination_profile,
+    subtract_background_floor,
     smooth_image,
     split_equal_width,
     stitch,
@@ -96,6 +100,34 @@ class ProcessingTests(unittest.TestCase):
     def test_smooth_image_rejects_non_2d_inputs(self):
         with self.assertRaises(ValueError):
             smooth_image(np.arange(5), 3, 3)
+
+    def test_gaussian_smooth_image_rejects_non_2d_inputs(self):
+        with self.assertRaises(ValueError):
+            gaussian_smooth_image(np.arange(5), 3, 3)
+
+    def test_background_subtraction_floors_negative_values(self):
+        image = np.array([[80, 100, 125]], dtype=np.uint16)
+        np.testing.assert_array_equal(subtract_background_floor(image, 100), [[0, 0, 25]])
+
+    def test_position_gaussian_filter_flattens_background_subtracted_illumination(self):
+        y = np.linspace(-1, 1, 41)[:, None]
+        x = np.linspace(-1, 1, 61)[None, :]
+        illumination = 100 + 80 - 30 * x**2 - 15 * y**2
+        stack = np.stack([illumination, illumination * 1.05, illumination * 0.95]).astype(np.uint16)
+        correction_filter, blurred, reference, sigma = gaussian_correction_filter_from_images(
+            stack,
+            sigma=5,
+            background=100,
+            clip_min=0.25,
+            clip_max=4.0,
+        )
+        corrected = correct_tile_with_background_filter(stack[0], correction_filter, 100)
+        raw_bg = subtract_background_floor(stack[0], 100)
+        self.assertEqual(correction_filter.shape, stack[0].shape)
+        self.assertEqual(blurred.shape, stack[0].shape)
+        self.assertGreater(reference, 0)
+        self.assertEqual(sigma, 5)
+        self.assertLess(np.std(corrected) / np.mean(corrected), np.std(raw_bg) / np.mean(raw_bg))
 
     def test_reference_selection_prefers_bright_flat_profile(self):
         curved = 100 - 30 * np.linspace(-1, 1, 101) ** 2

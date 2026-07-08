@@ -443,6 +443,104 @@ def save_flatfield_2d_comparison_plot(
     plt.close(fig)
 
 
+def save_position_gaussian_step_plot(
+    path: Path,
+    *,
+    raw_profile: np.ndarray,
+    background_subtracted_profile: np.ndarray,
+    quadratic_profile: np.ndarray,
+    position_gaussian_profile: np.ndarray,
+    gaussian_reference_mean_profile: np.ndarray,
+    gaussian_blurred_mean_profile: np.ndarray,
+    gaussian_filter_profile: np.ndarray,
+    position_label: str,
+    channel: ChannelConfig,
+    title: str,
+) -> None:
+    """Show one fixed position before and after the background Gaussian trial."""
+    fig, axes = plt.subplots(4, 1, figsize=(12, 14), constrained_layout=True)
+    axes[0].plot(raw_profile, color="black", linewidth=1.2, label=f"{position_label} raw")
+    axes[0].plot(
+        background_subtracted_profile,
+        color=channel.plot_color,
+        linewidth=1.2,
+        label=f"{position_label} raw - background",
+    )
+    axes[0].set(title=f"{title} - selected position profile", ylabel="Mean intensity")
+
+    axes[1].plot(
+        gaussian_reference_mean_profile,
+        color="tab:gray",
+        linewidth=1.2,
+        label="time-stack mean after background subtraction",
+    )
+    axes[1].plot(
+        gaussian_blurred_mean_profile,
+        color="tab:orange",
+        linewidth=1.6,
+        label="Gaussian-smoothed illumination estimate",
+    )
+    axes[1].set(title="Fixed-position reference used to build the filter", ylabel="Mean intensity")
+
+    axes[2].plot(
+        gaussian_filter_profile,
+        color="tab:purple",
+        linewidth=1.4,
+        label="median(smoothed reference) / smoothed reference",
+    )
+    axes[2].axhline(1.0, color="black", linewidth=0.8, alpha=0.5)
+    axes[2].set(title="2-D Gaussian correction filter, averaged over Y", ylabel="Multiplier")
+
+    axes[3].plot(raw_profile, color="black", linewidth=1.0, alpha=0.75, label="raw")
+    axes[3].plot(
+        quadratic_profile,
+        color="tab:blue",
+        linewidth=1.2,
+        label="quadratic corrected",
+    )
+    axes[3].plot(
+        position_gaussian_profile,
+        color=channel.plot_color,
+        linewidth=1.4,
+        label="background-subtracted Gaussian corrected",
+    )
+    axes[3].set(
+        title="Comparison for the same position",
+        xlabel="Local x coordinate (pixels)",
+        ylabel="Mean intensity",
+    )
+    for ax in axes:
+        ax.grid(alpha=0.2)
+        ax.legend(fontsize=8)
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+
+
+def save_max_difference_plot(
+    path: Path,
+    records: list[dict[str, object]],
+    channel: ChannelConfig,
+    title: str,
+) -> None:
+    """Plot raw P02/P05 max-intensity differences across time for one channel."""
+    selected = sorted(
+        [record for record in records if record["channel"] == channel.label],
+        key=lambda record: int(record["timepoint"]),
+    )
+    fig, ax = plt.subplots(figsize=(8, 5), constrained_layout=True)
+    x = [int(record["timepoint"]) for record in selected]
+    raw_y = [float(record["difference_raw"]) for record in selected]
+    bg_y = [float(record["difference_background_subtracted"]) for record in selected]
+    ax.plot(x, raw_y, marker="o", color=channel.plot_color, label="raw max difference")
+    ax.plot(x, bg_y, marker="s", color="black", linestyle="--", alpha=0.65, label="after subtracting 100")
+    ax.axhline(0, color="black", linewidth=0.8, alpha=0.5)
+    ax.set(title=title, xlabel="Timepoint", ylabel="Max intensity difference (a.u.)")
+    ax.grid(alpha=0.2)
+    ax.legend()
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+
+
 def write_rows_csv(path: Path, rows: list[dict[str, object]]) -> None:
     """Write a generic table using the keys from the first row."""
     path.parent.mkdir(parents=True, exist_ok=True)

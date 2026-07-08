@@ -50,7 +50,12 @@ timepoint. Descending X matches this experiment's recorded left-to-right order;
    quadratic laser fit with a more edge-following correction that uses the
    smoothed reference profile directly. On the 2-D flat-field experiment branch,
    `flatfield_2d_comparison` additionally tests correction from a smoothed 2-D
-   reference tile illumination map.
+   reference tile illumination map. On the fixed-position Gaussian experiment
+   branch, `position_gaussian_bg100_comparison` tests an ImageAnalysis-style
+   Gaussian 2-D filter built from one position over the selected timepoints
+   after subtracting the microscope background of 100 and flooring negatives at
+   zero. The default diagnostic references are GFP P02 and Cy5 P06; the primary
+   corrected TIFFs still use the quadratic correction.
 4. Save one graph per channel containing the corrected physical-mm x profile for
    every timepoint. Solid line segments are measured image data. Dashed lines
    span the unmeasured gaps between positions as visual interpolation only. The
@@ -64,6 +69,11 @@ timepoint. Descending X matches this experiment's recorded left-to-right order;
 6. Calculate the corrected gradient slope from measured pixels in P01 through
    P06, excluding P07. Save one CSV/JSON table with slope in `a.u./mm`,
    intercept, and R². Save one slope-over-time graph per channel.
+
+7. Save a raw max-intensity comparison between P02 and P05 over time. GFP uses
+   `max_intensity(P02) - max_intensity(P05)` and Cy5 uses
+   `max_intensity(P05) - max_intensity(P02)`. The table also records the same
+   comparison after subtracting the microscope background of 100.
 
 TIFF files contain measurement values. Files ending in `_preview.png` are 8-bit
 colorized display copies using local per-image scaling, so dim timepoints are

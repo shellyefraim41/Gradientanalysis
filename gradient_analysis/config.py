@@ -45,6 +45,13 @@ class AnalysisConfig:
     preview_low_percentile: float = 1.0
     preview_high_percentile: float = 99.8
     save_corrected_tiles: bool = True
+    microscope_background: float = 100.0
+    position_gaussian_references: dict[str, int] = field(
+        default_factory=lambda: {"GFP": 2, "Cy5": 6}
+    )
+    position_gaussian_sigma_px: float | None = None
+    position_gaussian_clip_min: float = 0.25
+    position_gaussian_clip_max: float = 4.0
 
     @classmethod
     def from_json(cls, path: str | Path | None) -> "AnalysisConfig":

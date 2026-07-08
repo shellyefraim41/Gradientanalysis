@@ -104,6 +104,67 @@ def smooth_image(image: np.ndarray, window_y: int, window_x: int) -> np.ndarray:
     return smoothed
 
 
+def gaussian_kernel1d(sigma: float) -> np.ndarray:
+    """Return a normalized 1-D Gaussian kernel."""
+    sigma = float(sigma)
+    if sigma <= 0:
+        return np.ones(1, dtype=np.float64)
+    radius = max(1, int(np.ceil(4.0 * sigma)))
+    x = np.arange(-radius, radius + 1, dtype=np.float64)
+    kernel = np.exp(-(x**2) / (2.0 * sigma**2))
+    return kernel / float(np.sum(kernel))
+
+
+def gaussian_smooth_image(image: np.ndarray, sigma_y: float, sigma_x: float) -> np.ndarray:
+    """Smooth a 2-D image with reflected separable Gaussian kernels."""
+    if image.ndim != 2:
+        raise ValueError("Only 2-D images can be Gaussian-smoothed.")
+    smoothed = image.astype(np.float64, copy=False)
+    for axis, sigma in ((0, sigma_y), (1, sigma_x)):
+        kernel = gaussian_kernel1d(float(sigma))
+        if kernel.size == 1:
+            continue
+        pad = kernel.size // 2
+        padded = np.pad(
+            smoothed,
+            ((pad, pad), (0, 0)) if axis == 0 else ((0, 0), (pad, pad)),
+            mode="reflect",
+        )
+        smoothed = np.apply_along_axis(lambda values: np.convolve(values, kernel, mode="valid"), axis, padded)
+    return smoothed
+
+
+def subtract_background_floor(image: np.ndarray, background: float) -> np.ndarray:
+    """Subtract a constant background and floor negative values at zero."""
+    return np.maximum(image.astype(np.float32) - float(background), 0.0)
+
+
+def gaussian_correction_filter_from_images(
+    images: np.ndarray,
+    *,
+    sigma: float | None = None,
+    background: float = 100.0,
+    clip_min: float = 0.25,
+    clip_max: float = 4.0,
+) -> tuple[np.ndarray, np.ndarray, float, float]:
+    """Build a median-normalized Gaussian flat-field filter from a stack."""
+    stack = np.asarray(images)
+    if stack.ndim != 3:
+        raise ValueError("Gaussian correction input must be a stack shaped (n, y, x).")
+    if clip_min <= 0 or clip_max < clip_min:
+        raise ValueError("Correction filter clipping must satisfy 0 < clip_min <= clip_max.")
+    corrected_stack = subtract_background_floor(stack, background)
+    mean_image = np.mean(corrected_stack, axis=0, dtype=np.float64)
+    resolved_sigma = float(sigma) if sigma is not None else max(mean_image.shape[0] / 12.0, 1.0)
+    blurred = gaussian_smooth_image(mean_image, resolved_sigma, resolved_sigma)
+    positive = blurred[np.isfinite(blurred) & (blurred > 0)]
+    reference = float(np.median(positive)) if positive.size else 1.0
+    denominator = np.maximum(blurred, max(reference * 0.01, np.finfo(float).eps))
+    correction_filter = np.clip(reference / denominator, float(clip_min), float(clip_max))
+    correction_filter = np.nan_to_num(correction_filter, nan=1.0, posinf=float(clip_max), neginf=float(clip_min))
+    return correction_filter.astype(np.float32), blurred.astype(np.float32), reference, resolved_sigma
+
+
 def fitted_illumination_profile(
     reference_profile: np.ndarray,
     smoothing_window: int,
@@ -236,6 +297,17 @@ def correct_tile_2d(tile: np.ndarray, illumination_map: np.ndarray, plateau: flo
         raise ValueError("2-D illumination map shape does not match tile shape.")
     curve = float(plateau) / illumination_map.astype(np.float32)
     return tile.astype(np.float32) * curve
+
+
+def correct_tile_with_background_filter(
+    tile: np.ndarray,
+    correction_filter: np.ndarray,
+    background: float,
+) -> np.ndarray:
+    """Subtract constant background, floor at zero, then apply a 2-D filter."""
+    if tile.shape != correction_filter.shape:
+        raise ValueError("Correction filter shape does not match tile shape.")
+    return subtract_background_floor(tile, background) * correction_filter.astype(np.float32)
 
 
 def to_uint16(image: np.ndarray) -> tuple[np.ndarray, int]:

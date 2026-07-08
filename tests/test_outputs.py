@@ -9,6 +9,7 @@ from PIL import Image
 
 from gradient_analysis.outputs import (
     save_color_preview,
+    save_max_difference_plot,
     save_normalization_plot,
     save_slope_timecourse_plot,
     save_tiff,
@@ -70,6 +71,33 @@ class OutputTests(unittest.TestCase):
         )
         self.assertTrue(csv_path.read_text(encoding="utf-8").startswith("timepoint,channel"))
         with Image.open(png_path) as image:
+            self.assertGreater(image.size[0], 0)
+
+    def test_max_difference_plot_outputs_image(self):
+        folder = Path.cwd() / ".test_outputs"
+        folder.mkdir(exist_ok=True)
+        path = folder / "max_difference.png"
+        records = [
+            {
+                "timepoint": 0,
+                "channel": "GFP",
+                "difference_raw": 120.0,
+                "difference_background_subtracted": 120.0,
+            },
+            {
+                "timepoint": 18,
+                "channel": "GFP",
+                "difference_raw": 80.0,
+                "difference_background_subtracted": 80.0,
+            },
+        ]
+        save_max_difference_plot(
+            path,
+            records,
+            ChannelConfig("GFP", ("gfp",), "#20a83e", (0, 1, 0)),
+            "Max difference test",
+        )
+        with Image.open(path) as image:
             self.assertGreater(image.size[0], 0)
 
     def test_step4_slope_table_value_format_has_no_units(self):
