@@ -99,6 +99,59 @@ def fitted_illumination_profile(
     return fitted, plateau
 
 
+def normalized_profile_shape(profile: np.ndarray, smoothing_window: int) -> np.ndarray:
+    """Return a smoothed x-profile normalized by its median brightness."""
+    smooth = smooth_profile(profile, smoothing_window)
+    median = max(float(np.median(smooth)), np.finfo(float).eps)
+    return smooth / median
+
+
+def profile_curvature(profile: np.ndarray, smoothing_window: int) -> float:
+    """Estimate broad quadratic curvature after median normalization."""
+    normalized = normalized_profile_shape(profile, smoothing_window)
+    x = np.linspace(-1.0, 1.0, normalized.size)
+    coefficients = np.polyfit(x, normalized, min(2, normalized.size - 1))
+    return float(coefficients[0]) if coefficients.size == 3 else 0.0
+
+
+def reference_candidate_score(
+    profiles: list[np.ndarray],
+    mean_intensities: list[float],
+    saturated_fractions: list[float],
+    smoothing_window: int,
+    saturation_threshold: float,
+    brightness_scale: float | None = None,
+) -> dict[str, float | bool | int]:
+    """Score one position as a stable, bright illumination reference candidate."""
+    if not (profiles and len(profiles) == len(mean_intensities) == len(saturated_fractions)):
+        raise ValueError("Reference candidate inputs must be non-empty and equal length.")
+
+    normalized = np.stack([normalized_profile_shape(profile, smoothing_window) for profile in profiles])
+    shape_variability = float(np.mean(np.std(normalized, axis=0))) if len(profiles) > 1 else 0.0
+    median_brightness = float(np.median(mean_intensities))
+    max_saturated_fraction = float(np.max(saturated_fractions))
+    unsaturated = max_saturated_fraction <= saturation_threshold
+    scale = brightness_scale if brightness_scale and brightness_scale > 0 else median_brightness
+    brightness_fraction = median_brightness / max(float(scale), np.finfo(float).eps)
+    saturation_penalty = 0.0 if unsaturated else 50.0 * (max_saturated_fraction - saturation_threshold)
+    score = brightness_fraction / (1.0 + 20.0 * shape_variability + saturation_penalty)
+    if not unsaturated:
+        score *= 0.01
+
+    reference_shape = np.median(normalized, axis=0)
+    distances = np.mean(np.abs(normalized - reference_shape[np.newaxis, :]), axis=1)
+    best_profile_index = int(np.argmin(distances))
+    return {
+        "score": float(score),
+        "median_brightness": median_brightness,
+        "brightness_fraction": float(brightness_fraction),
+        "shape_variability": shape_variability,
+        "max_saturated_fraction": max_saturated_fraction,
+        "unsaturated": bool(unsaturated),
+        "best_profile_index": best_profile_index,
+    }
+
+
 def linearity_score(profile: np.ndarray, smoothing_window: int) -> float:
     """Score bright, flat profiles highly; used only for automatic selection."""
     smooth = smooth_profile(profile, smoothing_window)

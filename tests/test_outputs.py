@@ -15,6 +15,7 @@ from gradient_analysis.outputs import (
     save_timecourse_plot,
     slope_table_value,
     write_csv,
+    write_rows_csv,
 )
 from gradient_analysis.config import ChannelConfig
 
@@ -73,6 +74,13 @@ class OutputTests(unittest.TestCase):
 
     def test_step4_slope_table_value_format_has_no_units(self):
         self.assertEqual(slope_table_value(-0.1705084), "-0.1705")
+
+    def test_generic_rows_csv_uses_first_row_fields(self):
+        folder = Path.cwd() / ".test_outputs"
+        folder.mkdir(exist_ok=True)
+        path = folder / "diagnostics.csv"
+        write_rows_csv(path, [{"channel": "GFP", "raw": 1.0, "corrected": 2.0}])
+        self.assertTrue(path.read_text(encoding="utf-8").startswith("channel,raw,corrected"))
 
     def test_timecourse_plot_accepts_gradient_slope_records(self):
         folder = Path.cwd() / ".test_outputs"

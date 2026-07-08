@@ -23,7 +23,7 @@ import tifffile
 from PIL import Image
 
 from .config import ChannelConfig
-from .processing import colorize_scaled, display_scale, smooth_profile
+from .processing import colorize_scaled, display_scale, normalized_profile_shape, smooth_profile
 
 
 def slope_table_value(slope: float) -> str:
@@ -302,6 +302,49 @@ def save_slope_timecourse_plot(
     ax.legend()
     fig.savefig(path, dpi=180)
     plt.close(fig)
+
+
+def save_reference_selection_plot(
+    path: Path,
+    profiles_by_timepoint: list[tuple[int, np.ndarray]],
+    channel: ChannelConfig,
+    position_label: str,
+    title: str,
+    smoothing_window: int,
+) -> None:
+    """Plot normalized profile shapes for the selected correction reference position."""
+    fig, ax = plt.subplots(figsize=(10, 5), constrained_layout=True)
+    colors = plt.colormaps["viridis"](np.linspace(0.0, 1.0, len(profiles_by_timepoint)))
+    for color, (timepoint, profile) in zip(colors, profiles_by_timepoint):
+        ax.plot(
+            normalized_profile_shape(profile, smoothing_window),
+            color=color,
+            linewidth=1.2,
+            alpha=0.9,
+            label=f"t={timepoint}",
+        )
+    ax.set(
+        title=title,
+        xlabel=f"{position_label} local x coordinate (pixels)",
+        ylabel="Smoothed profile / median",
+    )
+    ax.grid(alpha=0.2)
+    ax.legend(ncol=6, fontsize=7)
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+
+
+def write_rows_csv(path: Path, rows: list[dict[str, object]]) -> None:
+    """Write a generic table using the keys from the first row."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not rows:
+        path.write_text("", encoding="utf-8")
+        return
+    fieldnames = list(rows[0].keys())
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def write_csv(path: Path, rows: list[dict[str, object]]) -> None:

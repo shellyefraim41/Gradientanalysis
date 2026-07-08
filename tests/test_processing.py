@@ -18,6 +18,8 @@ from gradient_analysis.processing import (
     flatten_segments,
     merge_rgb,
     physical_x_axes_mm,
+    profile_curvature,
+    reference_candidate_score,
     position_span,
     split_equal_width,
     stitch,
@@ -58,6 +60,29 @@ class ProcessingTests(unittest.TestCase):
         flat = np.full(101, 95.0)
         dim_flat = np.full(101, 20.0)
         self.assertEqual(choose_reference([curved, flat, dim_flat], 9), 1)
+
+    def test_stable_reference_score_prefers_normalized_shape_stability(self):
+        x = np.linspace(-1, 1, 101)
+        laser = 100 - 30 * x**2
+        stable_profiles = [laser * 1.0, laser * 1.4, laser * 0.8]
+        changing_profiles = [laser, laser * (1.0 + 0.3 * x), laser * (1.0 - 0.3 * x)]
+        stable = reference_candidate_score(stable_profiles, [100, 140, 80], [0, 0, 0], 9, 0.001, 140)
+        changing = reference_candidate_score(changing_profiles, [120, 120, 120], [0, 0, 0], 9, 0.001, 140)
+        self.assertLess(stable["shape_variability"], changing["shape_variability"])
+        self.assertGreater(stable["score"], changing["score"])
+
+    def test_reference_score_penalizes_saturation(self):
+        profile = np.full(51, 100.0)
+        clean = reference_candidate_score([profile], [100], [0.0], 5, 0.001, 100)
+        saturated = reference_candidate_score([profile], [100], [0.01], 5, 0.001, 100)
+        self.assertTrue(clean["unsaturated"])
+        self.assertFalse(saturated["unsaturated"])
+        self.assertLess(saturated["score"], clean["score"])
+
+    def test_profile_curvature_reports_quadratic_component(self):
+        x = np.linspace(-1, 1, 101)
+        curved = 100 - 25 * x**2
+        self.assertLess(profile_curvature(curved, 9), 0.0)
 
     def test_merge_has_green_and_magenta_components(self):
         green = np.arange(16, dtype=float).reshape(4, 4)

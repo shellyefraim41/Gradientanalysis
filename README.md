@@ -26,9 +26,10 @@ timepoint. Descending X matches this experiment's recorded left-to-right order;
    interpolation over unmeasured space; they are not added to the saved data or
    used for slope fitting.
 3. Work from the separate position images. For each channel, scan all selected
-   timepoints and positions and choose one fixed correction reference: the
-   unsaturated image with the highest mean intensity. Fit a quadratic trendline
-   to that single reference profile and calculate:
+   timepoints and positions and choose one fixed correction reference from
+   bright, unsaturated candidates whose normalized local-x profile shape changes
+   least over time. Fit a quadratic trendline to that single reference profile
+   and calculate:
 
    `corrected(y, x) = raw(y, x) * median(fitted_laser_profile) / fitted_laser_profile(x)`
 
@@ -42,7 +43,9 @@ timepoint. Descending X matches this experiment's recorded left-to-right order;
    corrected values placed on the physical-mm device axis. The local-x panel can
    look much straighter because it shows each field of view separately; the
    physical-mm panel preserves the between-position gradient. Graphs are
-   calculated from float corrected values before TIFF rounding.
+   calculated from float corrected values before TIFF rounding. Candidate
+   reference scores and selected-reference stability plots are saved under
+   `step_03_illumination_corrected/reference_selection/`.
 4. Save one graph per channel containing the corrected physical-mm x profile for
    every timepoint. Solid line segments are measured image data. Dashed lines
    span the unmeasured gaps between positions as visual interpolation only. The
@@ -50,7 +53,9 @@ timepoint. Descending X matches this experiment's recorded left-to-right order;
    linear fit, and a side table lists gradient slope by timepoint with units in
    the table header.
 5. Save one GFP/Cy5 graph per timepoint, matching Step 2 but using corrected
-   values. The P01-P06 fit is overlaid for each channel.
+   values. The P01-P06 fit is overlaid for each channel. Raw versions of the
+   Step 4, Step 5, and Step 6 analyses are saved in `raw_comparison` folders so
+   pilot runs can be checked before running all timepoints.
 6. Calculate the corrected gradient slope from measured pixels in P01 through
    P06, excluding P07. Save one CSV/JSON table with slope in `a.u./mm`,
    intercept, and R². Save one slope-over-time graph per channel.
@@ -86,7 +91,8 @@ the exact Z index used. Existing runs are not overwritten.
 
 For a quick trial, set `"timepoints": [0, 18]` in a copied config. Verify the
 reported channel mapping, left-to-right position order, physical-mm spacing,
-and Step 3 fixed correction reference before starting all 49 timepoints.
+Step 3 fixed correction reference, and raw-versus-corrected comparison outputs
+before starting all 49 timepoints.
 
 The included `pilot_config.json` is already restricted to `t=0` and `t=18` for
 this check.
