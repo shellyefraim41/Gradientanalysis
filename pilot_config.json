@@ -11,6 +11,9 @@
   "trendline_window_px": 201,
   "correction_fit_degree": 2,
   "bridge_position": 4,
+  "slope_start_position": 1,
+  "slope_end_position": 6,
+  "saturation_fraction_threshold": 0.001,
   "preview_low_percentile": 1.0,
   "preview_high_percentile": 99.8,
   "save_corrected_tiles": true

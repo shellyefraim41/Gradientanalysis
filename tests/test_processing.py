@@ -14,8 +14,12 @@ from gradient_analysis.processing import (
     histogram_percentile_range,
     image_percentile_range,
     linear_fit,
+    linear_fit_xy,
+    flatten_segments,
     merge_rgb,
+    physical_x_axes_mm,
     position_span,
+    split_equal_width,
     stitch,
     to_uint16,
     update_uint16_histogram,
@@ -87,6 +91,27 @@ class ProcessingTests(unittest.TestCase):
 
     def test_bridge_position_span_for_p04(self):
         self.assertEqual(position_span(3, 2304), (6912, 9216))
+
+    def test_physical_x_axes_start_p01_left_edge_at_zero(self):
+        axes = physical_x_axes_mm([1000.0, 0.0], pixel_size_um=500.0, tile_width=2)
+        np.testing.assert_allclose(axes[0], [0.0, 0.5])
+        np.testing.assert_allclose(axes[1], [1.0, 1.5])
+        self.assertGreater(axes[1][0] - axes[0][-1], 0.0)
+
+    def test_flatten_segments_and_mm_linear_fit(self):
+        axes = [np.array([0.0, 0.5]), np.array([2.0, 2.5])]
+        profiles = [10.0 + 3.0 * axes[0], 10.0 + 3.0 * axes[1]]
+        x, y = flatten_segments(axes, profiles, 0, 1)
+        fit = linear_fit_xy(x, y)
+        self.assertAlmostEqual(fit["slope"], 3.0)
+        self.assertAlmostEqual(fit["intercept"], 10.0)
+        self.assertAlmostEqual(fit["r_squared"], 1.0)
+
+    def test_split_equal_width_recovers_tiles(self):
+        image = np.arange(12, dtype=np.uint16).reshape(2, 6)
+        tiles = split_equal_width(image, 3)
+        self.assertEqual(len(tiles), 3)
+        np.testing.assert_array_equal(tiles[1], image[:, 2:4])
 
     def test_linear_fit_reports_known_slope(self):
         profile = 4.0 * np.arange(10) + 7.0

@@ -23,15 +23,16 @@ from .outputs import (
     write_json,
 )
 from .processing import (
-    choose_reference,
     correct_tile,
     empty_uint16_histogram,
     fitted_illumination_profile,
+    flatten_segments,
     histogram_percentile_range,
     image_percentile_range,
-    linear_fit,
+    linear_fit_xy,
     merge_rgb,
-    position_span,
+    physical_x_axes_mm,
+    split_equal_width,
     stitch,
     to_uint16,
     update_uint16_histogram,
@@ -48,6 +49,45 @@ def _timepoint_folder(parent: Path, timepoint: int) -> Path:
     return parent / f"t{timepoint:03d}"
 
 
+def _empty_reference() -> dict[str, object]:
+    return {
+        "mean_intensity": -np.inf,
+        "timepoint": None,
+        "position_list_index": None,
+        "position_label": None,
+        "position_nd2_index": None,
+        "saturated_fraction": None,
+        "profile": None,
+        "used_saturated_fallback": False,
+    }
+
+
+def _maybe_update_reference(
+    candidate: dict[str, object],
+    *,
+    mean_intensity: float,
+    saturated_fraction: float,
+    timepoint: int,
+    position_list_index: int,
+    position_label: str,
+    position_nd2_index: int,
+    profile: np.ndarray,
+) -> None:
+    if mean_intensity <= float(candidate["mean_intensity"]):
+        return
+    candidate.update(
+        {
+            "mean_intensity": mean_intensity,
+            "timepoint": timepoint,
+            "position_list_index": position_list_index,
+            "position_label": position_label,
+            "position_nd2_index": position_nd2_index,
+            "saturated_fraction": saturated_fraction,
+            "profile": profile.copy(),
+        }
+    )
+
+
 def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: AnalysisConfig) -> Path:
     """Run all requested steps and return the newly created run directory."""
     source_path = Path(nd2_path)
@@ -58,27 +98,52 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
     step3 = run_dir / "step_03_illumination_corrected"
     step4 = run_dir / "step_04_timecourse_profiles"
     step5 = run_dir / "step_05_corrected_x_profiles"
-    step6 = run_dir / "step_06_bridge_slopes"
+    step6 = run_dir / "step_06_gradient_slopes"
     for folder in (step1, step2, step3, step4, step5, step6):
         folder.mkdir(parents=True, exist_ok=False)
 
-    timecourse: dict[str, dict[int, np.ndarray]] = {c.label: {} for c in config.channels}
+    timecourse: dict[str, dict[int, list[tuple[np.ndarray, np.ndarray]]]] = {
+        c.label: {} for c in config.channels
+    }
     raw_histograms = {c.label: empty_uint16_histogram() for c in config.channels}
     corrected_histograms = {c.label: empty_uint16_histogram() for c in config.channels}
     raw_tiff_paths: dict[str, dict[int, Path]] = {c.label: {} for c in config.channels}
     corrected_tiff_paths: dict[str, dict[int, Path]] = {c.label: {} for c in config.channels}
-    bridge_records: list[dict[str, float | int | str | None]] = []
+    slope_records: list[dict[str, float | int | str | None]] = []
     local_preview_ranges: dict[str, dict[str, list[int]]] = {"raw": {}, "corrected": {}}
     metadata: dict[str, object] = {}
     base = _safe_stem(source_path.stem)
 
     with ND2Source(source_path, config) as source:
-        bridge_list_index = config.bridge_position - 1
-        if not 0 <= bridge_list_index < len(source.positions):
+        if source.pixel_size_um is None:
+            raise ValueError("Cannot build a physical mm axis because ND2 pixel size metadata were not found.")
+        slope_start_index = config.slope_start_position - 1
+        slope_end_index = config.slope_end_position - 1
+        if not 0 <= slope_start_index <= slope_end_index < len(source.positions):
             raise ValueError(
-                f"Bridge position {config.bridge_position} is outside the available "
-                f"positions 1-{len(source.positions)}."
+                f"Slope positions must fall within 1-{len(source.positions)} and start <= end."
             )
+
+        tile_width = int(source.sizes["X"])
+        x_axes_mm = physical_x_axes_mm(
+            [p.x_um for p in source.positions],
+            source.pixel_size_um,
+            tile_width,
+        )
+        position_ranges_mm = [
+            {
+                "label": position.name,
+                "nd2_index": position.index,
+                "x_start_mm": float(axis[0]),
+                "x_end_mm": float(axis[-1]),
+                "stage_x_um": position.x_um,
+                "stage_y_um": position.y_um,
+            }
+            for position, axis in zip(source.positions, x_axes_mm)
+        ]
+
+        best_unsaturated = {c.label: _empty_reference() for c in config.channels}
+        best_any = {c.label: _empty_reference() for c in config.channels}
 
         metadata = {
             "source": str(source_path.resolve()),
@@ -91,86 +156,136 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
                 {"label": p.name, "nd2_index": p.index, "x_um": p.x_um, "y_um": p.y_um}
                 for p in source.positions
             ],
+            "position_ranges_mm_p01_left_edge_zero": position_ranges_mm,
             "pixel_size_um": source.pixel_size_um,
-            "correction_method": "quadratic_reference_trendline",
+            "correction_method": "fixed_channel_reference_max_mean_quadratic_trendline",
             "correction_formula": (
                 "corrected(y,x) = raw(y,x) * median(fitted_laser_profile) "
-                "/ fitted_laser_profile(x)"
+                "/ fitted_laser_profile(x); one fitted_laser_profile per channel"
             ),
             "correction_fit_degree": config.correction_fit_degree,
-            "bridge_position_one_based": config.bridge_position,
-            "bridge_position_label": source.positions[bridge_list_index].name,
-            "bridge_position_nd2_index": source.positions[bridge_list_index].index,
-            "step_04_values": "corrected stitched x profiles with P04 bridge slope annotations",
-            "step_05_values": "corrected stitched x profiles with P04 bridge slope overlays",
-            "step_06_values": "linear slopes fitted to corrected P04 bridge profiles",
+            "saturation_fraction_threshold": config.saturation_fraction_threshold,
+            "slope_start_position": source.positions[slope_start_index].name,
+            "slope_end_position": source.positions[slope_end_index].name,
+            "step_02_values": "raw measured x profiles on physical mm axis; dashed lines span unmeasured gaps",
+            "step_04_values": "corrected measured x profiles on physical mm axis with P01-P06 slope table",
+            "step_05_values": "corrected measured x profiles per timepoint on physical mm axis",
+            "step_06_values": "linear slopes fitted to corrected measured pixels from P01 through P06",
         }
 
+        # Pass 1: read the ND2 once, save raw contact-sheet images, make raw
+        # physical-axis plots, and select one fixed correction reference per channel.
         for t in source.timepoints:
-            raw_tiles: dict[str, list[np.ndarray]] = {}
-            raw_stitched_profiles: dict[str, np.ndarray] = {}
-
-            # Load at most two channels x seven positions for one timepoint.
+            raw_segmented_profiles: dict[str, list[tuple[np.ndarray, np.ndarray]]] = {}
             for channel in config.channels:
                 tiles = [source.plane(t, p.index, channel) for p in source.positions]
-                raw_tiles[channel.label] = tiles
-                for tile in tiles:
+                for i, (position, tile) in enumerate(zip(source.positions, tiles)):
                     update_uint16_histogram(raw_histograms[channel.label], tile)
+                    profile = x_profile(tile)
+                    mean_intensity = float(np.mean(tile))
+                    saturated_fraction = float(np.count_nonzero(tile == np.iinfo(np.uint16).max) / tile.size)
+                    _maybe_update_reference(
+                        best_any[channel.label],
+                        mean_intensity=mean_intensity,
+                        saturated_fraction=saturated_fraction,
+                        timepoint=t,
+                        position_list_index=i,
+                        position_label=position.name,
+                        position_nd2_index=position.index,
+                        profile=profile,
+                    )
+                    if saturated_fraction <= config.saturation_fraction_threshold:
+                        _maybe_update_reference(
+                            best_unsaturated[channel.label],
+                            mean_intensity=mean_intensity,
+                            saturated_fraction=saturated_fraction,
+                            timepoint=t,
+                            position_list_index=i,
+                            position_label=position.name,
+                            position_nd2_index=position.index,
+                            profile=profile,
+                        )
+
+                raw_segmented_profiles[channel.label] = [
+                    (axis, x_profile(tile)) for axis, tile in zip(x_axes_mm, tiles)
+                ]
                 large = stitch(tiles)
-                raw_stitched_profiles[channel.label] = x_profile(large)
                 prefix = f"{base}_t{t:03d}_z{config.z_index:02d}_{channel.label}_positions_left-to-right"
                 tiff_path = _timepoint_folder(step1, t) / f"{prefix}.tif"
                 save_tiff(tiff_path, large)
                 raw_tiff_paths[channel.label][t] = tiff_path
 
             save_profile_plot(
-                step2 / f"{base}_t{t:03d}_z{config.z_index:02d}_GFP-Cy5_x-profile.png",
-                raw_stitched_profiles,
+                step2 / f"{base}_t{t:03d}_z{config.z_index:02d}_GFP-Cy5_x-profile-mm.png",
+                raw_segmented_profiles,
                 config.channels,
-                f"{source_path.name} — t={t}, Z={config.z_index} (raw)",
+                f"{source_path.name} — t={t}, Z={config.z_index} (raw, physical x)",
                 config.trendline_window_px,
             )
 
-            bridge_fits_for_t: dict[str, dict[str, float | int | str | None]] = {}
+        fixed_corrections: dict[str, dict[str, object]] = {}
+        for channel in config.channels:
+            selected = best_unsaturated[channel.label]
+            if selected["profile"] is None:
+                selected = best_any[channel.label]
+                selected["used_saturated_fallback"] = True
+            fitted_laser_profile, plateau = fitted_illumination_profile(
+                selected["profile"],  # type: ignore[arg-type]
+                config.smoothing_window_px,
+                config.correction_fit_degree,
+            )
+            fixed_corrections[channel.label] = {
+                **{k: v for k, v in selected.items() if k != "profile"},
+                "plateau": plateau,
+                "fitted_laser_profile": fitted_laser_profile,
+                "curve": plateau / fitted_laser_profile,
+            }
+        metadata["fixed_correction_references"] = {
+            label: {k: v for k, v in details.items() if k not in {"fitted_laser_profile", "curve"}}
+            for label, details in fixed_corrections.items()
+        }
+
+        # Pass 2: apply fixed per-channel correction to raw TIFF contact sheets.
+        for t in source.timepoints:
+            gradient_fits_for_t: dict[str, dict[str, float | int | str | None]] = {}
+            corrected_at_t: dict[str, list[tuple[np.ndarray, np.ndarray]]] = {}
             for channel in config.channels:
-                tiles = raw_tiles[channel.label]
+                raw_large = tifffile.imread(raw_tiff_paths[channel.label][t])
+                tiles = split_equal_width(raw_large, len(source.positions))
                 local_profiles = [x_profile(tile) for tile in tiles]
-                manual_position = config.reference_positions.get(channel.label)
-                if manual_position is None:
-                    ref_list_index = choose_reference(local_profiles, config.smoothing_window_px)
-                else:
-                    indices = [p.index for p in source.positions]
-                    if manual_position not in indices:
-                        raise ValueError(
-                            f"Reference position {manual_position} for {channel.label} is not in {indices}"
-                        )
-                    ref_list_index = indices.index(manual_position)
-
-                fitted_laser_profile, plateau = fitted_illumination_profile(
-                    local_profiles[ref_list_index],
-                    config.smoothing_window_px,
-                    config.correction_fit_degree,
-                )
-                curve = plateau / fitted_laser_profile
-                corrected = [correct_tile(tile, curve) for tile in tiles]
+                curve = fixed_corrections[channel.label]["curve"]
+                fitted_laser_profile = fixed_corrections[channel.label]["fitted_laser_profile"]
+                plateau = float(fixed_corrections[channel.label]["plateau"])
+                corrected = [correct_tile(tile, curve) for tile in tiles]  # type: ignore[arg-type]
                 corrected_profiles = [x_profile(tile) for tile in corrected]
-                # Step 4, Step 5, and Step 6 all use these float-precision values.
-                timecourse[channel.label][t] = np.concatenate(corrected_profiles)
+                corrected_segments = [
+                    (axis, profile) for axis, profile in zip(x_axes_mm, corrected_profiles)
+                ]
+                corrected_at_t[channel.label] = corrected_segments
+                timecourse[channel.label][t] = corrected_segments
 
-                start_px, end_px = position_span(bridge_list_index, tiles[bridge_list_index].shape[1])
-                fit = linear_fit(corrected_profiles[bridge_list_index], source.pixel_size_um)
-                bridge_record = {
+                fit_x, fit_y = flatten_segments(
+                    x_axes_mm,
+                    corrected_profiles,
+                    slope_start_index,
+                    slope_end_index,
+                )
+                fit = linear_fit_xy(fit_x, fit_y)
+                slope_record = {
                     "timepoint": t,
                     "channel": channel.label,
-                    "position_label": source.positions[bridge_list_index].name,
-                    "position_one_based": config.bridge_position,
-                    "position_nd2_index": source.positions[bridge_list_index].index,
-                    "start_px": start_px,
-                    "end_px": end_px,
-                    **fit,
+                    "start_position_label": source.positions[slope_start_index].name,
+                    "end_position_label": source.positions[slope_end_index].name,
+                    "start_position_one_based": config.slope_start_position,
+                    "end_position_one_based": config.slope_end_position,
+                    "x_start_mm": float(fit_x[0]),
+                    "x_end_mm": float(fit_x[-1]),
+                    "slope_au_per_mm": fit["slope"],
+                    "intercept": fit["intercept"],
+                    "r_squared": fit["r_squared"],
                 }
-                bridge_records.append(bridge_record)
-                bridge_fits_for_t[channel.label] = bridge_record
+                slope_records.append(slope_record)
+                gradient_fits_for_t[channel.label] = slope_record
 
                 converted_tiles: list[np.ndarray] = []
                 clipped_pixels = 0
@@ -191,48 +306,59 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
                         )
                 corrected_tiff = (
                     channel_dir
-                    / f"{base}_t{t:03d}_z{config.z_index:02d}_{channel.label}_corrected_stitched.tif"
+                    / f"{base}_t{t:03d}_z{config.z_index:02d}_{channel.label}_corrected_contact-sheet.tif"
                 )
                 save_tiff(corrected_tiff, stitch(converted_tiles))
                 corrected_tiff_paths[channel.label][t] = corrected_tiff
 
+                fixed_ref = fixed_corrections[channel.label]
+                ref_index = (
+                    int(fixed_ref["position_list_index"])
+                    if fixed_ref["timepoint"] == t and fixed_ref["position_list_index"] is not None
+                    else -1
+                )
                 save_normalization_plot(
                     channel_dir
                     / f"{base}_t{t:03d}_z{config.z_index:02d}_{channel.label}_normalization_profiles.png",
                     local_profiles,
                     corrected_profiles,
-                    fitted_laser_profile,
-                    ref_list_index,
+                    fitted_laser_profile,  # type: ignore[arg-type]
+                    ref_index,
                     [p.name for p in source.positions],
                     channel,
-                    f"{source_path.name} — t={t}, {channel.label}; plateau={plateau:.3g}",
+                    (
+                        f"{source_path.name} — t={t}, {channel.label}; fixed ref="
+                        f"t{int(fixed_ref['timepoint']):03d} {fixed_ref['position_label']}; plateau={plateau:.3g}"
+                    ),
+                    corrected_segments,
                 )
                 write_json(
                     channel_dir / "normalization_details.json",
                     {
-                        "reference_position_label": source.positions[ref_list_index].name,
-                        "reference_nd2_index": source.positions[ref_list_index].index,
-                        "selection": "automatic" if manual_position is None else "manual",
+                        "fixed_reference_timepoint": fixed_ref["timepoint"],
+                        "fixed_reference_position_label": fixed_ref["position_label"],
+                        "fixed_reference_nd2_index": fixed_ref["position_nd2_index"],
+                        "fixed_reference_mean_intensity": fixed_ref["mean_intensity"],
+                        "fixed_reference_saturated_fraction": fixed_ref["saturated_fraction"],
+                        "used_saturated_fallback": fixed_ref["used_saturated_fallback"],
                         "plateau": plateau,
                         "smoothing_window_px": config.smoothing_window_px,
-                        "trendline_window_px": config.trendline_window_px,
                         "correction_fit_degree": config.correction_fit_degree,
-                        "correction_method": "quadratic_reference_trendline",
+                        "correction_method": "fixed_channel_reference_max_mean_quadratic_trendline",
                         "corrected_tiff_dtype": "uint16",
                         "rounded_or_clipped_range": [0, 65535],
                         "clipped_pixel_count": clipped_pixels,
                     },
                 )
 
-            corrected_at_t = {c.label: timecourse[c.label][t] for c in config.channels}
             save_profile_plot(
                 step5
-                / f"{base}_t{t:03d}_z{config.z_index:02d}_GFP-Cy5_corrected_x-profile.png",
+                / f"{base}_t{t:03d}_z{config.z_index:02d}_GFP-Cy5_corrected_x-profile-mm.png",
                 corrected_at_t,
                 config.channels,
-                f"{source_path.name} — t={t}, Z={config.z_index} (corrected)",
+                f"{source_path.name} — t={t}, Z={config.z_index} (corrected, physical x)",
                 config.trendline_window_px,
-                bridge_fits_for_t,
+                gradient_fits_for_t,
             )
 
         raw_ranges = {
@@ -270,8 +396,6 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
             ),
         }
 
-        # The global limits are known only after the streaming pass. Create PNGs
-        # from saved TIFFs, avoiding a second read of the 250 GB ND2.
         for t in source.timepoints:
             raw_images: list[np.ndarray] = []
             for channel in config.channels:
@@ -284,17 +408,8 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
                     config.preview_high_percentile,
                 )
                 local_preview_ranges["raw"][f"t{t:03d}_{channel.label}"] = list(local_range)
-                save_preview(
-                    path.with_name(f"{path.stem}_grayscale_preview.png"),
-                    image,
-                    *local_range,
-                )
-                save_color_preview(
-                    path.with_name(f"{path.stem}_preview.png"),
-                    image,
-                    *local_range,
-                    channel.rgb,
-                )
+                save_preview(path.with_name(f"{path.stem}_grayscale_preview.png"), image, *local_range)
+                save_color_preview(path.with_name(f"{path.stem}_preview.png"), image, *local_range, channel.rgb)
                 save_color_preview(
                     path.with_name(f"{path.stem}_global_preview.png"),
                     image,
@@ -322,17 +437,8 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
                     config.preview_high_percentile,
                 )
                 local_preview_ranges["corrected"][f"t{t:03d}_{channel.label}"] = list(local_range)
-                save_preview(
-                    path.with_name(f"{path.stem}_grayscale_preview.png"),
-                    image,
-                    *local_range,
-                )
-                save_color_preview(
-                    path.with_name(f"{path.stem}_preview.png"),
-                    image,
-                    *local_range,
-                    channel.rgb,
-                )
+                save_preview(path.with_name(f"{path.stem}_grayscale_preview.png"), image, *local_range)
+                save_color_preview(path.with_name(f"{path.stem}_preview.png"), image, *local_range, channel.rgb)
                 save_color_preview(
                     path.with_name(f"{path.stem}_global_preview.png"),
                     image,
@@ -344,22 +450,22 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
         for channel in config.channels:
             save_timecourse_plot(
                 step4
-                / f"{base}_z{config.z_index:02d}_{channel.label}_all-timepoints_x-profiles.png",
+                / f"{base}_z{config.z_index:02d}_{channel.label}_all-timepoints_x-profiles-mm.png",
                 timecourse[channel.label],
                 channel,
                 f"{source_path.name} — {channel.label}, all corrected timepoints, Z={config.z_index}",
                 config.trendline_window_px,
-                bridge_records,
+                slope_records,
             )
             save_slope_timecourse_plot(
-                step6 / f"{base}_z{config.z_index:02d}_{channel.label}_P04_bridge_slope_over_time.png",
-                bridge_records,
+                step6 / f"{base}_z{config.z_index:02d}_{channel.label}_P01-P06_slope_over_time.png",
+                slope_records,
                 channel,
-                f"{source_path.name} — {channel.label}, corrected P04 bridge slope",
+                f"{source_path.name} — {channel.label}, corrected P01-P06 slope",
             )
 
-        write_csv(step6 / f"{base}_z{config.z_index:02d}_P04_bridge_slopes.csv", bridge_records)
-        write_json(step6 / f"{base}_z{config.z_index:02d}_P04_bridge_slopes.json", bridge_records)
+        write_csv(step6 / f"{base}_z{config.z_index:02d}_P01-P06_slopes.csv", slope_records)
+        write_json(step6 / f"{base}_z{config.z_index:02d}_P01-P06_slopes.json", slope_records)
 
     write_json(run_dir / "run_metadata.json", metadata)
     return run_dir

@@ -8,11 +8,12 @@ import tifffile
 from PIL import Image
 
 from gradient_analysis.outputs import (
-    bridge_slope_value,
     save_color_preview,
+    save_normalization_plot,
     save_slope_timecourse_plot,
     save_tiff,
     save_timecourse_plot,
+    slope_table_value,
     write_csv,
 )
 from gradient_analysis.config import ChannelConfig
@@ -46,13 +47,13 @@ class OutputTests(unittest.TestCase):
             {
                 "timepoint": 0,
                 "channel": "GFP",
-                "position_label": "P04",
-                "position_one_based": 4,
-                "position_nd2_index": 3,
-                "start_px": 6,
-                "end_px": 8,
-                "slope_per_pixel": 1.5,
-                "slope_per_um": 4.6,
+                "start_position_label": "P01",
+                "end_position_label": "P06",
+                "start_position_one_based": 1,
+                "end_position_one_based": 6,
+                "x_start_mm": 0.0,
+                "x_end_mm": 8.0,
+                "slope_au_per_mm": 1.5,
                 "intercept": 2.0,
                 "r_squared": 0.99,
             }
@@ -71,41 +72,41 @@ class OutputTests(unittest.TestCase):
             self.assertGreater(image.size[0], 0)
 
     def test_step4_slope_table_value_format_has_no_units(self):
-        self.assertEqual(bridge_slope_value(-0.1705084), "-0.1705")
+        self.assertEqual(slope_table_value(-0.1705084), "-0.1705")
 
-    def test_timecourse_plot_accepts_bridge_records(self):
+    def test_timecourse_plot_accepts_gradient_slope_records(self):
         folder = Path.cwd() / ".test_outputs"
         folder.mkdir(exist_ok=True)
-        path = folder / "step4_with_bridge.png"
+        path = folder / "step4_with_gradient_slope.png"
         profiles = {
-            0: np.linspace(0, 9, 10),
-            18: np.linspace(10, 1, 10),
+            0: [(np.linspace(0, 1, 5), np.linspace(0, 4, 5)), (np.linspace(2, 3, 5), np.linspace(8, 12, 5))],
+            18: [(np.linspace(0, 1, 5), np.linspace(10, 6, 5)), (np.linspace(2, 3, 5), np.linspace(2, -2, 5))],
         }
         records = [
             {
                 "timepoint": 0,
                 "channel": "GFP",
-                "position_label": "P04",
-                "position_one_based": 4,
-                "position_nd2_index": 3,
-                "start_px": 2,
-                "end_px": 8,
-                "slope_per_pixel": 1.0,
-                "slope_per_um": 3.0,
-                "intercept": 2.0,
+                "start_position_label": "P01",
+                "end_position_label": "P06",
+                "start_position_one_based": 1,
+                "end_position_one_based": 6,
+                "x_start_mm": 0.0,
+                "x_end_mm": 3.0,
+                "slope_au_per_mm": 1.0,
+                "intercept": 0.0,
                 "r_squared": 1.0,
             },
             {
                 "timepoint": 18,
                 "channel": "GFP",
-                "position_label": "P04",
-                "position_one_based": 4,
-                "position_nd2_index": 3,
-                "start_px": 2,
-                "end_px": 8,
-                "slope_per_pixel": -1.0,
-                "slope_per_um": -3.0,
-                "intercept": 8.0,
+                "start_position_label": "P01",
+                "end_position_label": "P06",
+                "start_position_one_based": 1,
+                "end_position_one_based": 6,
+                "x_start_mm": 0.0,
+                "x_end_mm": 3.0,
+                "slope_au_per_mm": -1.0,
+                "intercept": 10.0,
                 "r_squared": 1.0,
             },
         ]
@@ -116,6 +117,30 @@ class OutputTests(unittest.TestCase):
             "Step 4 bridge test",
             trendline_window=3,
             bridge_records=records,
+        )
+        with Image.open(path) as image:
+            self.assertGreater(image.size[0], 0)
+
+    def test_normalization_plot_accepts_physical_corrected_segments(self):
+        folder = Path.cwd() / ".test_outputs"
+        folder.mkdir(exist_ok=True)
+        path = folder / "normalization_with_physical_axis.png"
+        raw_profiles = [np.linspace(5, 10, 6), np.linspace(10, 20, 6)]
+        corrected_profiles = [np.linspace(8, 9, 6), np.linspace(12, 13, 6)]
+        physical_segments = [
+            (np.linspace(0.0, 0.5, 6), corrected_profiles[0]),
+            (np.linspace(1.5, 2.0, 6), corrected_profiles[1]),
+        ]
+        save_normalization_plot(
+            path,
+            raw_profiles,
+            corrected_profiles,
+            np.linspace(1, 2, 6),
+            reference_list_index=0,
+            position_labels=["P01", "P02"],
+            channel=ChannelConfig("GFP", ("gfp",), "#20a83e", (0, 1, 0)),
+            title="Normalization test",
+            corrected_physical_segments=physical_segments,
         )
         with Image.open(path) as image:
             self.assertGreater(image.size[0], 0)

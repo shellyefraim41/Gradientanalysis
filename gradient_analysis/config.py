@@ -39,6 +39,9 @@ class AnalysisConfig:
     trendline_window_px: int = 201
     correction_fit_degree: int = 2
     bridge_position: int = 4
+    slope_start_position: int = 1
+    slope_end_position: int = 6
+    saturation_fraction_threshold: float = 0.001
     preview_low_percentile: float = 1.0
     preview_high_percentile: float = 99.8
     save_corrected_tiles: bool = True

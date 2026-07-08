@@ -22,6 +22,53 @@ def x_profile(image: np.ndarray) -> np.ndarray:
     return np.mean(image, axis=0, dtype=np.float64)
 
 
+def physical_x_axes_mm(
+    position_x_um: list[float],
+    pixel_size_um: float,
+    tile_width: int,
+) -> list[np.ndarray]:
+    """Return one physical x-axis per position, with P01 left edge at 0 mm.
+
+    Stage X metadata are treated as image-center coordinates. Positions are
+    expected in the already-resolved left-to-right order. Since all tiles have
+    equal width, the left-edge offset between positions equals the stage-center
+    offset between those positions.
+    """
+    if not position_x_um:
+        raise ValueError("At least one position is required.")
+    if pixel_size_um <= 0:
+        raise ValueError("Pixel size must be positive.")
+    if tile_width <= 0:
+        raise ValueError("Tile width must be positive.")
+    direction = 1.0
+    if len(position_x_um) > 1 and position_x_um[-1] > position_x_um[0]:
+        direction = -1.0
+    pixel_mm = pixel_size_um / 1000.0
+    first_center = float(position_x_um[0])
+    local = np.arange(tile_width, dtype=np.float64) * pixel_mm
+    return [
+        direction * (first_center - float(center_um)) / 1000.0 + local
+        for center_um in position_x_um
+    ]
+
+
+def flatten_segments(
+    x_segments: list[np.ndarray],
+    y_segments: list[np.ndarray],
+    start_index: int = 0,
+    end_index: int | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Concatenate selected measured profile segments for fitting."""
+    if end_index is None:
+        end_index = len(x_segments) - 1
+    if not (0 <= start_index <= end_index < len(x_segments) == len(y_segments)):
+        raise ValueError("Invalid segment range for flattening.")
+    return (
+        np.concatenate(x_segments[start_index : end_index + 1]),
+        np.concatenate(y_segments[start_index : end_index + 1]),
+    )
+
+
 def smooth_profile(profile: np.ndarray, window: int) -> np.ndarray:
     """Robustly smooth a 1-D profile using an odd reflected moving average."""
     if profile.size < 3:
@@ -160,22 +207,45 @@ def position_span(position_list_index: int, tile_width: int) -> tuple[int, int]:
     return start, start + int(tile_width)
 
 
-def linear_fit(profile: np.ndarray, pixel_size_um: float | None = None) -> dict[str, float | None]:
+def linear_fit_xy(x: np.ndarray, y: np.ndarray) -> dict[str, float]:
     """Fit y = slope*x + intercept and report slope plus R²."""
-    y = profile.astype(np.float64)
-    x = np.arange(y.size, dtype=np.float64)
+    if x.size != y.size or x.size < 2:
+        raise ValueError("x and y must have equal length >= 2.")
+    x = x.astype(np.float64)
+    y = y.astype(np.float64)
     slope, intercept = np.polyfit(x, y, 1)
     fitted = slope * x + intercept
     ss_res = float(np.sum((y - fitted) ** 2))
     ss_tot = float(np.sum((y - float(np.mean(y))) ** 2))
     r_squared = 1.0 if ss_tot == 0.0 else 1.0 - ss_res / ss_tot
+    return {
+        "slope": float(slope),
+        "intercept": float(intercept),
+        "r_squared": float(r_squared),
+    }
+
+
+def linear_fit(profile: np.ndarray, pixel_size_um: float | None = None) -> dict[str, float | None]:
+    """Fit y = slope*x + intercept using pixel coordinate x and report R²."""
+    y = profile.astype(np.float64)
+    x = np.arange(y.size, dtype=np.float64)
+    fit = linear_fit_xy(x, y)
+    slope = fit["slope"]
     slope_per_um = None if not pixel_size_um else float(slope / pixel_size_um)
     return {
         "slope_per_pixel": float(slope),
         "slope_per_um": slope_per_um,
-        "intercept": float(intercept),
-        "r_squared": float(r_squared),
+        "intercept": fit["intercept"],
+        "r_squared": fit["r_squared"],
     }
+
+
+def split_equal_width(image: np.ndarray, count: int) -> list[np.ndarray]:
+    """Split a stitched/contact-sheet image back into equal-width tiles."""
+    if count <= 0 or image.shape[1] % count:
+        raise ValueError("Image width must divide evenly by count.")
+    width = image.shape[1] // count
+    return [image[:, i * width : (i + 1) * width] for i in range(count)]
 
 
 def display_scale(image: np.ndarray, low_value: float, high_value: float) -> np.ndarray:
