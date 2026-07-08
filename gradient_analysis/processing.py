@@ -99,6 +99,18 @@ def fitted_illumination_profile(
     return fitted, plateau
 
 
+def smoothed_illumination_profile(
+    reference_profile: np.ndarray,
+    smoothing_window: int,
+) -> tuple[np.ndarray, float]:
+    """Use the smoothed reference x-profile directly as the illumination profile."""
+    fitted = smooth_profile(reference_profile, smoothing_window)
+    plateau = float(np.median(fitted))
+    floor = max(plateau * 0.05, np.finfo(float).eps)
+    fitted = np.maximum(fitted, floor)
+    return fitted.astype(np.float64), plateau
+
+
 def normalized_profile_shape(profile: np.ndarray, smoothing_window: int) -> np.ndarray:
     """Return a smoothed x-profile normalized by its median brightness."""
     smooth = smooth_profile(profile, smoothing_window)

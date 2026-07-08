@@ -11,6 +11,7 @@ import tifffile
 from .config import AnalysisConfig
 from .nd2_source import ND2Source
 from .outputs import (
+    save_correction_method_comparison_plot,
     save_color_preview,
     save_normalization_plot,
     save_preview,
@@ -36,6 +37,7 @@ from .processing import (
     physical_x_axes_mm,
     profile_curvature,
     reference_candidate_score,
+    smoothed_illumination_profile,
     split_equal_width,
     stitch,
     to_uint16,
@@ -103,7 +105,20 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
     raw_step5 = step5 / "raw_comparison"
     raw_step6 = step6 / "raw_comparison"
     diagnostics_dir = step3 / "reference_selection"
-    for folder in (step1, step2, step3, step4, step5, step6, raw_step4, raw_step5, raw_step6, diagnostics_dir):
+    smoothed_comparison_dir = step3 / "smoothed_profile_comparison"
+    for folder in (
+        step1,
+        step2,
+        step3,
+        step4,
+        step5,
+        step6,
+        raw_step4,
+        raw_step5,
+        raw_step6,
+        diagnostics_dir,
+        smoothed_comparison_dir,
+    ):
         folder.mkdir(parents=True, exist_ok=False)
 
     timecourse: dict[str, dict[int, list[tuple[np.ndarray, np.ndarray]]]] = {
@@ -119,6 +134,7 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
     slope_records: list[dict[str, float | int | str | None]] = []
     raw_slope_records: list[dict[str, float | int | str | None]] = []
     diagnostic_records: list[dict[str, object]] = []
+    smoothed_diagnostic_records: list[dict[str, object]] = []
     local_preview_ranges: dict[str, dict[str, list[int]]] = {"raw": {}, "corrected": {}}
     metadata: dict[str, object] = {}
     base = _safe_stem(source_path.stem)
@@ -181,9 +197,15 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
             "position_ranges_mm_p01_left_edge_zero": position_ranges_mm,
             "pixel_size_um": source.pixel_size_um,
             "correction_method": "fixed_channel_reference_stable_bright_quadratic_trendline",
+            "comparison_correction_method": "fixed_channel_reference_stable_bright_smoothed_profile",
             "correction_formula": (
                 "corrected(y,x) = raw(y,x) * median(fitted_laser_profile) "
                 "/ fitted_laser_profile(x); one fitted_laser_profile per channel"
+            ),
+            "comparison_note": (
+                "Primary corrected TIFFs use the quadratic fitted laser profile. "
+                "step_03_illumination_corrected/smoothed_profile_comparison stores "
+                "diagnostic plots and tables using the smoothed reference profile directly."
             ),
             "correction_fit_degree": config.correction_fit_degree,
             "saturation_fraction_threshold": config.saturation_fraction_threshold,
@@ -302,6 +324,10 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
                 config.smoothing_window_px,
                 config.correction_fit_degree,
             )
+            smoothed_laser_profile, smoothed_plateau = smoothed_illumination_profile(
+                selected_profile,  # type: ignore[arg-type]
+                config.smoothing_window_px,
+            )
             fixed_corrections[channel.label] = {
                 "mean_intensity": float(selected_mean),
                 "timepoint": int(selected_timepoint),
@@ -317,6 +343,9 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
                 "plateau": plateau,
                 "fitted_laser_profile": fitted_laser_profile,
                 "curve": plateau / fitted_laser_profile,
+                "smoothed_profile_plateau": smoothed_plateau,
+                "smoothed_fitted_laser_profile": smoothed_laser_profile,
+                "smoothed_profile_curve": smoothed_plateau / smoothed_laser_profile,
             }
             save_reference_selection_plot(
                 diagnostics_dir / f"{base}_z{config.z_index:02d}_{channel.label}_selected_reference_shapes.png",
@@ -332,7 +361,16 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
         write_rows_csv(diagnostics_dir / "reference_candidate_scores.csv", reference_candidate_rows)
         write_json(diagnostics_dir / "reference_candidate_scores.json", reference_candidate_rows)
         metadata["fixed_correction_references"] = {
-            label: {k: v for k, v in details.items() if k not in {"fitted_laser_profile", "curve"}}
+            label: {
+                k: v
+                for k, v in details.items()
+                if k not in {
+                    "fitted_laser_profile",
+                    "curve",
+                    "smoothed_fitted_laser_profile",
+                    "smoothed_profile_curve",
+                }
+            }
             for label, details in fixed_corrections.items()
         }
 
@@ -347,8 +385,13 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
                 curve = fixed_corrections[channel.label]["curve"]
                 fitted_laser_profile = fixed_corrections[channel.label]["fitted_laser_profile"]
                 plateau = float(fixed_corrections[channel.label]["plateau"])
+                smoothed_curve = fixed_corrections[channel.label]["smoothed_profile_curve"]
+                smoothed_laser_profile = fixed_corrections[channel.label]["smoothed_fitted_laser_profile"]
+                smoothed_plateau = float(fixed_corrections[channel.label]["smoothed_profile_plateau"])
                 corrected = [correct_tile(tile, curve) for tile in tiles]  # type: ignore[arg-type]
                 corrected_profiles = [x_profile(tile) for tile in corrected]
+                smoothed_corrected = [correct_tile(tile, smoothed_curve) for tile in tiles]  # type: ignore[arg-type]
+                smoothed_corrected_profiles = [x_profile(tile) for tile in smoothed_corrected]
                 corrected_segments = [
                     (axis, profile) for axis, profile in zip(x_axes_mm, corrected_profiles)
                 ]
@@ -386,6 +429,24 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
                     slope_start_index,
                     slope_end_index,
                 )
+                _, smoothed_fit_y = flatten_segments(
+                    x_axes_mm,
+                    smoothed_corrected_profiles,
+                    slope_start_index,
+                    slope_end_index,
+                )
+                smoothed_slope_record = _slope_record(
+                    timepoint=t,
+                    channel_label=channel.label,
+                    x_axes_mm=x_axes_mm,
+                    profiles=smoothed_corrected_profiles,
+                    slope_start_index=slope_start_index,
+                    slope_end_index=slope_end_index,
+                    start_position_label=source.positions[slope_start_index].name,
+                    end_position_label=source.positions[slope_end_index].name,
+                    slope_start_position=config.slope_start_position,
+                    slope_end_position=config.slope_end_position,
+                )
                 fixed_ref = fixed_corrections[channel.label]
                 diagnostic_records.append(
                     {
@@ -401,6 +462,23 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
                         "reference_shape_variability": fixed_ref["reference_shape_variability"],
                     }
                 )
+                smoothed_diagnostic_records.append(
+                    {
+                        "timepoint": t,
+                        "channel": channel.label,
+                        "raw_slope_au_per_mm": raw_record["slope_au_per_mm"],
+                        "quadratic_slope_au_per_mm": slope_record["slope_au_per_mm"],
+                        "smoothed_profile_slope_au_per_mm": smoothed_slope_record["slope_au_per_mm"],
+                        "raw_curvature": profile_curvature(raw_fit_y, config.trendline_window_px),
+                        "quadratic_curvature": profile_curvature(corrected_fit_y, config.trendline_window_px),
+                        "smoothed_profile_curvature": profile_curvature(smoothed_fit_y, config.trendline_window_px),
+                        "reference_position_label": fixed_ref["position_label"],
+                        "reference_timepoint": fixed_ref["timepoint"],
+                        "quadratic_plateau": plateau,
+                        "smoothed_profile_plateau": smoothed_plateau,
+                        "reference_selection_score": fixed_ref["reference_selection_score"],
+                    }
+                )
 
                 converted_tiles: list[np.ndarray] = []
                 clipped_pixels = 0
@@ -412,6 +490,8 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
 
                 channel_dir = step3 / f"t{t:03d}" / channel.label
                 channel_dir.mkdir(parents=True, exist_ok=True)
+                comparison_channel_dir = smoothed_comparison_dir / f"t{t:03d}" / channel.label
+                comparison_channel_dir.mkdir(parents=True, exist_ok=True)
                 if config.save_corrected_tiles:
                     for position, tile in zip(source.positions, converted_tiles):
                         save_tiff(
@@ -447,6 +527,22 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
                     ),
                     corrected_segments,
                 )
+                save_correction_method_comparison_plot(
+                    comparison_channel_dir
+                    / f"{base}_t{t:03d}_z{config.z_index:02d}_{channel.label}_quadratic-vs-smoothed-profile.png",
+                    local_profiles,
+                    corrected_profiles,
+                    smoothed_corrected_profiles,
+                    fitted_laser_profile,  # type: ignore[arg-type]
+                    smoothed_laser_profile,  # type: ignore[arg-type]
+                    ref_index,
+                    [p.name for p in source.positions],
+                    channel,
+                    (
+                        f"{source_path.name} - t={t}, {channel.label}; fixed ref="
+                        f"t{int(fixed_ref['timepoint']):03d} {fixed_ref['position_label']}"
+                    ),
+                )
                 write_json(
                     channel_dir / "normalization_details.json",
                     {
@@ -464,6 +560,12 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
                         "reference_shape_variability": fixed_ref["reference_shape_variability"],
                         "reference_brightness_fraction": fixed_ref["reference_brightness_fraction"],
                         "reference_max_saturated_fraction": fixed_ref["reference_max_saturated_fraction"],
+                        "comparison_correction_method": "fixed_channel_reference_stable_bright_smoothed_profile",
+                        "smoothed_profile_plateau": smoothed_plateau,
+                        "smoothed_profile_note": (
+                            "Diagnostic only: uses smooth_profile(reference_profile) directly "
+                            "as the fitted laser profile, with the same median-preserving correction formula."
+                        ),
                         "corrected_tiff_dtype": "uint16",
                         "rounded_or_clipped_range": [0, 65535],
                         "clipped_pixel_count": clipped_pixels,
@@ -603,6 +705,14 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
         write_json(raw_step6 / f"{base}_z{config.z_index:02d}_P01-P06_raw_slopes.json", raw_slope_records)
         write_rows_csv(step6 / "raw_vs_corrected_diagnostics.csv", diagnostic_records)
         write_json(step6 / "raw_vs_corrected_diagnostics.json", diagnostic_records)
+        write_rows_csv(
+            smoothed_comparison_dir / "quadratic_vs_smoothed_profile_diagnostics.csv",
+            smoothed_diagnostic_records,
+        )
+        write_json(
+            smoothed_comparison_dir / "quadratic_vs_smoothed_profile_diagnostics.json",
+            smoothed_diagnostic_records,
+        )
         write_csv(step6 / f"{base}_z{config.z_index:02d}_P01-P06_slopes.csv", slope_records)
         write_json(step6 / f"{base}_z{config.z_index:02d}_P01-P06_slopes.json", slope_records)
 

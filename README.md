@@ -45,7 +45,10 @@ timepoint. Descending X matches this experiment's recorded left-to-right order;
    physical-mm panel preserves the between-position gradient. Graphs are
    calculated from float corrected values before TIFF rounding. Candidate
    reference scores and selected-reference stability plots are saved under
-   `step_03_illumination_corrected/reference_selection/`.
+   `step_03_illumination_corrected/reference_selection/`. A diagnostic
+   `smoothed_profile_comparison` folder also compares the conservative
+   quadratic laser fit with a more edge-following correction that uses the
+   smoothed reference profile directly.
 4. Save one graph per channel containing the corrected physical-mm x profile for
    every timepoint. Solid line segments are measured image data. Dashed lines
    span the unmeasured gaps between positions as visual interpolation only. The

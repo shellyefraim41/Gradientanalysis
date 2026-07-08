@@ -334,6 +334,54 @@ def save_reference_selection_plot(
     plt.close(fig)
 
 
+def save_correction_method_comparison_plot(
+    path: Path,
+    raw_profiles: list[np.ndarray],
+    quadratic_profiles: list[np.ndarray],
+    smoothed_profiles: list[np.ndarray],
+    quadratic_laser_profile: np.ndarray,
+    smoothed_laser_profile: np.ndarray,
+    reference_list_index: int,
+    position_labels: list[str],
+    channel: ChannelConfig,
+    title: str,
+) -> None:
+    """Compare quadratic and smoothed-profile illumination correction on local x."""
+    fig, axes = plt.subplots(3, 1, figsize=(12, 12), constrained_layout=True)
+    for i, (raw, quadratic, smoothed) in enumerate(zip(raw_profiles, quadratic_profiles, smoothed_profiles)):
+        suffix = " (reference)" if i == reference_list_index else ""
+        label = position_labels[i] + suffix
+        axes[0].plot(raw, label=label, alpha=0.85)
+        axes[1].plot(quadratic, label=label, alpha=0.85)
+        axes[2].plot(smoothed, label=label, alpha=0.85)
+    axes[0].plot(
+        quadratic_laser_profile,
+        color="black",
+        linestyle="--",
+        linewidth=2.0,
+        label="quadratic fitted laser profile",
+    )
+    axes[0].plot(
+        smoothed_laser_profile,
+        color=channel.plot_color,
+        linestyle=":",
+        linewidth=2.0,
+        label="smoothed fitted laser profile",
+    )
+    axes[0].set(title=f"{title} - raw local-x profiles", ylabel="Mean intensity (a.u.)")
+    axes[1].set(title="After quadratic correction", ylabel="Corrected mean intensity")
+    axes[2].set(
+        title="After smoothed-profile correction",
+        xlabel="Local x coordinate (pixels)",
+        ylabel="Corrected mean intensity",
+    )
+    for ax in axes:
+        ax.grid(alpha=0.2)
+        ax.legend(ncol=4, fontsize=8)
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+
+
 def write_rows_csv(path: Path, rows: list[dict[str, object]]) -> None:
     """Write a generic table using the keys from the first row."""
     path.parent.mkdir(parents=True, exist_ok=True)

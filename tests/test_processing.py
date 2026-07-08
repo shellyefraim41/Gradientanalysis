@@ -21,6 +21,7 @@ from gradient_analysis.processing import (
     profile_curvature,
     reference_candidate_score,
     position_span,
+    smoothed_illumination_profile,
     split_equal_width,
     stitch,
     to_uint16,
@@ -54,6 +55,23 @@ class ProcessingTests(unittest.TestCase):
         self.assertEqual(fitted.shape, noisy.shape)
         self.assertGreater(plateau, 80)
         self.assertLess(np.std((illumination / fitted) / np.mean(illumination / fitted)), 0.04)
+
+    def test_smoothed_profile_correction_handles_sharp_edge_falloff_better_than_quadratic(self):
+        x = np.linspace(-1, 1, 301)
+        illumination = 100 - 20 * x**2
+        illumination[:24] *= np.linspace(0.35, 1.0, 24)
+        illumination[-24:] *= np.linspace(1.0, 0.35, 24)
+        tile = np.repeat(illumination[None, :], 8, axis=0)
+        reference = x_profile(tile)
+        quadratic, quadratic_plateau = fitted_illumination_profile(reference, smoothing_window=15, degree=2)
+        smoothed, smoothed_plateau = smoothed_illumination_profile(reference, smoothing_window=15)
+        quadratic_corrected = x_profile(correct_tile(tile, quadratic_plateau / quadratic))
+        smoothed_corrected = x_profile(correct_tile(tile, smoothed_plateau / smoothed))
+        raw_variation = np.std(reference) / np.mean(reference)
+        quadratic_variation = np.std(quadratic_corrected) / np.mean(quadratic_corrected)
+        smoothed_variation = np.std(smoothed_corrected) / np.mean(smoothed_corrected)
+        self.assertLess(quadratic_variation, raw_variation)
+        self.assertLess(smoothed_variation, quadratic_variation)
 
     def test_reference_selection_prefers_bright_flat_profile(self):
         curved = 100 - 30 * np.linspace(-1, 1, 101) ** 2
