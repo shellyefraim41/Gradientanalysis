@@ -12,7 +12,13 @@ index 14), sorts stage positions by descending metadata X, and processes every
 timepoint. Descending X matches this experiment's recorded left-to-right order;
 `position_x_order` can also be set to `ascending` or `acquisition`.
 
-1. Save a left-to-right contact sheet for image inspection. These Step 1 images
+1. Subtract the microscope background from every image first:
+
+   `signal(y, x) = max(raw(y, x) - 100, 0)`
+
+   All saved measurement values and subsequent analyses use this zero-based
+   signal; the background is not added back. Save a left-to-right contact sheet
+   for image inspection. These Step 1 images
    still place the positions directly beside each other, because they are meant
    for quick visual checking, not for distance measurement. Save a raw uint16
    TIFF and display-scaled PNG for each channel, plus a GFP/Cy5 merge PNG.
@@ -31,10 +37,11 @@ timepoint. Descending X matches this experiment's recorded left-to-right order;
    least over time. Fit a quadratic trendline to that single reference profile
    and calculate:
 
-   `corrected(y, x) = raw(y, x) * median(fitted_laser_profile) / fitted_laser_profile(x)`
+   `corrected(y, x) = signal(y, x) * median(fitted_laser_profile) / fitted_laser_profile(x)`
 
-   The fitted trendline is used as the estimated microscope laser profile for
-   that channel. The same correction curve is then reused for every timepoint
+   The quadratic includes `a`, `b`, and `c` in `y = ax^2 + bx + c`; `c` is its
+   fitted intensity baseline. The fitted trendline is used as the estimated
+   microscope laser profile for that channel. The same correction curve is then reused for every timepoint
    and every position in that channel. This avoids changing the correction from
    timepoint to timepoint and reduces the chance of flipping the chemical
    gradient shape. Save viewer-compatible corrected uint16 TIFF tiles, a
@@ -64,6 +71,10 @@ timepoint. Descending X matches this experiment's recorded left-to-right order;
 6. Calculate the corrected gradient slope from measured pixels in P01 through
    P06, excluding P07. Save one CSV/JSON table with slope in `a.u./mm`,
    intercept, and R². Save one slope-over-time graph per channel.
+7. Before illumination correction, calculate background-subtracted maximum
+   intensity differences over time. GFP uses `max(P02) - max(P05)` and Cy5 uses
+   `max(P05) - max(P02)`. Save both channel series on one graph and save the
+   values in CSV and JSON.
 
 TIFF files contain measurement values. Files ending in `_preview.png` are 8-bit
 colorized display copies using local per-image scaling, so dim timepoints are

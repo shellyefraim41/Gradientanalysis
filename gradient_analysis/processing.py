@@ -230,6 +230,11 @@ def correct_tile(tile: np.ndarray, curve: np.ndarray) -> np.ndarray:
     return tile.astype(np.float32) * curve.astype(np.float32)[np.newaxis, :]
 
 
+def subtract_background_floor(image: np.ndarray, background: float) -> np.ndarray:
+    """Subtract a constant microscope background and floor at zero."""
+    return np.maximum(image.astype(np.float32) - float(background), 0.0)
+
+
 def correct_tile_2d(tile: np.ndarray, illumination_map: np.ndarray, plateau: float) -> np.ndarray:
     """Apply a 2-D illumination correction and preserve floating precision."""
     if tile.shape != illumination_map.shape:

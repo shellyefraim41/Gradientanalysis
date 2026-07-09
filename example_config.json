@@ -29,6 +29,7 @@
   "bridge_position": 4,
   "slope_start_position": 1,
   "slope_end_position": 6,
+  "microscope_background": 100.0,
   "saturation_fraction_threshold": 0.001,
   "preview_low_percentile": 1.0,
   "preview_high_percentile": 99.8,

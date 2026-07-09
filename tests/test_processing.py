@@ -24,6 +24,7 @@ from gradient_analysis.processing import (
     position_span,
     smoothed_illumination_image,
     smoothed_illumination_profile,
+    subtract_background_floor,
     smooth_image,
     split_equal_width,
     stitch,
@@ -34,6 +35,21 @@ from gradient_analysis.processing import (
 
 
 class ProcessingTests(unittest.TestCase):
+    def test_background_subtraction_floors_negative_values(self):
+        image = np.array([[75, 100, 125]], dtype=np.uint16)
+        np.testing.assert_array_equal(subtract_background_floor(image, 100), [[0, 0, 25]])
+
+    def test_quadratic_correction_uses_zero_based_signal_without_restoring_background(self):
+        x = np.linspace(-1, 1, 101)
+        signal = 300 - 60 * x**2
+        acquired = np.repeat((signal + 100)[None, :], 8, axis=0)
+        zero_based = subtract_background_floor(acquired, 100)
+        fitted, plateau = fitted_illumination_profile(x_profile(zero_based), 9, degree=2)
+        corrected = correct_tile(zero_based, plateau / fitted)
+        self.assertLess(np.std(x_profile(corrected)), 1.0)
+        self.assertAlmostEqual(float(np.mean(corrected)), plateau, delta=1.0)
+        self.assertLess(float(np.mean(corrected)), float(np.mean(acquired)) - 90)
+
     def test_stitch_and_x_profile(self):
         left = np.full((3, 2), 2, dtype=np.uint16)
         right = np.full((3, 2), 6, dtype=np.uint16)

@@ -14,6 +14,7 @@ from .outputs import (
     save_correction_method_comparison_plot,
     save_color_preview,
     save_flatfield_2d_comparison_plot,
+    save_max_difference_timecourse_plot,
     save_normalization_plot,
     save_preview,
     save_profile_plot,
@@ -41,6 +42,7 @@ from .processing import (
     reference_candidate_score,
     smoothed_illumination_image,
     smoothed_illumination_profile,
+    subtract_background_floor,
     split_equal_width,
     stitch,
     to_uint16,
@@ -93,6 +95,32 @@ def _slope_record(
     }
 
 
+def _position_max_difference_record(
+    *,
+    timepoint: int,
+    channel_label: str,
+    p02_tile: np.ndarray,
+    p05_tile: np.ndarray,
+) -> dict[str, object]:
+    """Compare background-subtracted maxima with channel-specific direction."""
+    p02_max = float(np.max(p02_tile))
+    p05_max = float(np.max(p05_tile))
+    if channel_label == "Cy5":
+        formula = "max(P05)-max(P02)"
+        difference = p05_max - p02_max
+    else:
+        formula = "max(P02)-max(P05)"
+        difference = p02_max - p05_max
+    return {
+        "timepoint": timepoint,
+        "channel": channel_label,
+        "formula": formula,
+        "p02_max": p02_max,
+        "p05_max": p05_max,
+        "max_intensity_difference": difference,
+    }
+
+
 def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: AnalysisConfig) -> Path:
     """Run all requested steps and return the newly created run directory."""
     source_path = Path(nd2_path)
@@ -104,6 +132,7 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
     step4 = run_dir / "step_04_timecourse_profiles"
     step5 = run_dir / "step_05_corrected_x_profiles"
     step6 = run_dir / "step_06_gradient_slopes"
+    step7 = run_dir / "step_07_max_intensity_differences"
     raw_step4 = step4 / "raw_comparison"
     raw_step5 = step5 / "raw_comparison"
     raw_step6 = step6 / "raw_comparison"
@@ -117,6 +146,7 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
         step4,
         step5,
         step6,
+        step7,
         raw_step4,
         raw_step5,
         raw_step6,
@@ -141,6 +171,7 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
     diagnostic_records: list[dict[str, object]] = []
     smoothed_diagnostic_records: list[dict[str, object]] = []
     flatfield_2d_diagnostic_records: list[dict[str, object]] = []
+    max_difference_records: list[dict[str, object]] = []
     local_preview_ranges: dict[str, dict[str, list[int]]] = {"raw": {}, "corrected": {}}
     metadata: dict[str, object] = {}
     base = _safe_stem(source_path.stem)
@@ -207,9 +238,12 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
             "comparison_correction_method": "fixed_channel_reference_stable_bright_smoothed_profile",
             "flatfield_2d_comparison_method": "fixed_channel_reference_stable_bright_smoothed_2d_flatfield",
             "correction_formula": (
-                "corrected(y,x) = raw(y,x) * median(fitted_laser_profile) "
+                "signal(y,x) = max(raw(y,x) - microscope_background, 0); "
+                "corrected(y,x) = signal(y,x) * median(fitted_laser_profile) "
                 "/ fitted_laser_profile(x); one fitted_laser_profile per channel"
             ),
+            "microscope_background": config.microscope_background,
+            "background_restored_after_correction": False,
             "comparison_note": (
                 "Primary corrected TIFFs use the quadratic fitted laser profile. "
                 "step_03_illumination_corrected/smoothed_profile_comparison stores "
@@ -221,10 +255,11 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
             "saturation_fraction_threshold": config.saturation_fraction_threshold,
             "slope_start_position": source.positions[slope_start_index].name,
             "slope_end_position": source.positions[slope_end_index].name,
-            "step_02_values": "raw measured x profiles on physical mm axis; dashed lines span unmeasured gaps",
-            "step_04_values": "corrected measured x profiles on physical mm axis with P01-P06 slope table; raw_comparison contains the same raw analysis",
-            "step_05_values": "corrected measured x profiles per timepoint on physical mm axis; raw_comparison contains the same raw analysis",
-            "step_06_values": "linear slopes fitted to corrected measured pixels from P01 through P06; raw_comparison contains raw slopes",
+            "step_02_values": "background-subtracted measured x profiles on physical mm axis; dashed lines span unmeasured gaps",
+            "step_04_values": "corrected measured x profiles on physical mm axis with P01-P06 slope table; raw_comparison contains background-subtracted, uncorrected analysis",
+            "step_05_values": "corrected measured x profiles per timepoint on physical mm axis; raw_comparison contains background-subtracted, uncorrected analysis",
+            "step_06_values": "linear slopes fitted to corrected measured pixels from P01 through P06; raw_comparison contains background-subtracted, uncorrected slopes",
+            "step_07_values": "background-subtracted maxima before illumination correction; GFP is P02-P05 and Cy5 is P05-P02",
         }
 
         # Pass 1: read the ND2 once, save raw contact-sheet images, make raw
@@ -233,14 +268,23 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
             raw_segmented_profiles: dict[str, list[tuple[np.ndarray, np.ndarray]]] = {}
             raw_gradient_fits_for_t: dict[str, dict[str, float | int | str | None]] = {}
             for channel in config.channels:
-                tiles = [source.plane(t, p.index, channel) for p in source.positions]
+                acquired_tiles = [source.plane(t, p.index, channel) for p in source.positions]
+                tiles = [
+                    to_uint16(subtract_background_floor(tile, config.microscope_background))[0]
+                    for tile in acquired_tiles
+                ]
                 local_profiles: list[np.ndarray] = []
-                for i, (position, tile) in enumerate(zip(source.positions, tiles)):
+                for i, (position, tile, acquired_tile) in enumerate(
+                    zip(source.positions, tiles, acquired_tiles)
+                ):
                     update_uint16_histogram(raw_histograms[channel.label], tile)
                     profile = x_profile(tile)
                     local_profiles.append(profile)
                     mean_intensity = float(np.mean(tile))
-                    saturated_fraction = float(np.count_nonzero(tile == np.iinfo(np.uint16).max) / tile.size)
+                    saturated_fraction = float(
+                        np.count_nonzero(acquired_tile == np.iinfo(np.uint16).max)
+                        / acquired_tile.size
+                    )
                     candidate = reference_candidates[channel.label][i]
                     candidate["profiles"].append(profile.copy())
                     candidate["tiles"].append(tile.copy())
@@ -266,6 +310,15 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
                 )
                 raw_slope_records.append(raw_slope_record)
                 raw_gradient_fits_for_t[channel.label] = raw_slope_record
+                if len(tiles) >= 5:
+                    max_difference_records.append(
+                        _position_max_difference_record(
+                            timepoint=t,
+                            channel_label=channel.label,
+                            p02_tile=tiles[1],
+                            p05_tile=tiles[4],
+                        )
+                    )
                 large = stitch(tiles)
                 prefix = f"{base}_t{t:03d}_z{config.z_index:02d}_{channel.label}_positions_left-to-right"
                 tiff_path = _timepoint_folder(step1, t) / f"{prefix}.tif"
@@ -812,6 +865,20 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
         )
         write_csv(step6 / f"{base}_z{config.z_index:02d}_P01-P06_slopes.csv", slope_records)
         write_json(step6 / f"{base}_z{config.z_index:02d}_P01-P06_slopes.json", slope_records)
+        save_max_difference_timecourse_plot(
+            step7 / f"{base}_z{config.z_index:02d}_P02-P05_max_difference_over_time.png",
+            max_difference_records,
+            config.channels,
+            f"{source_path.name} - background-subtracted P02/P05 max differences",
+        )
+        write_rows_csv(
+            step7 / f"{base}_z{config.z_index:02d}_P02-P05_max_differences.csv",
+            max_difference_records,
+        )
+        write_json(
+            step7 / f"{base}_z{config.z_index:02d}_P02-P05_max_differences.json",
+            max_difference_records,
+        )
 
     write_json(run_dir / "run_metadata.json", metadata)
     return run_dir

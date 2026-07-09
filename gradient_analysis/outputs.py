@@ -304,6 +304,34 @@ def save_slope_timecourse_plot(
     plt.close(fig)
 
 
+def save_max_difference_timecourse_plot(
+    path: Path,
+    records: list[dict[str, object]],
+    channels: tuple[ChannelConfig, ...],
+    title: str,
+) -> None:
+    """Plot both channel-specific P02/P05 max differences over time."""
+    fig, ax = plt.subplots(figsize=(8, 5), constrained_layout=True)
+    for channel in channels:
+        selected = sorted(
+            [record for record in records if record["channel"] == channel.label],
+            key=lambda record: int(record["timepoint"]),
+        )
+        ax.plot(
+            [int(record["timepoint"]) for record in selected],
+            [float(record["max_intensity_difference"]) for record in selected],
+            marker="o",
+            color=channel.plot_color,
+            label=f"{channel.label} {selected[0]['formula']}" if selected else channel.label,
+        )
+    ax.axhline(0, color="black", linewidth=0.8, alpha=0.5)
+    ax.set(title=title, xlabel="Timepoint", ylabel="Background-subtracted max difference (a.u.)")
+    ax.grid(alpha=0.2)
+    ax.legend()
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+
+
 def save_reference_selection_plot(
     path: Path,
     profiles_by_timepoint: list[tuple[int, np.ndarray]],
