@@ -39,13 +39,20 @@ class AnalysisConfig:
     trendline_window_px: int = 201
     correction_fit_degree: int = 2
     bridge_position: int = 4
-    slope_start_position: int = 1
-    slope_end_position: int = 6
     microscope_background: float = 100.0
+    apply_illumination_correction: bool = True
+    correction_method: str = "overlap_quadratic"
+    overlap_min_signal: float = 5.0
     saturation_fraction_threshold: float = 0.001
     preview_low_percentile: float = 1.0
     preview_high_percentile: float = 99.8
     save_corrected_tiles: bool = True
+    feather_overlaps: bool = True
+    normalize_profiles: bool = True
+    tanh_fit_enabled: bool = True
+    tanh_max_points: int = 1024
+    all_z_enabled: bool = True
+    all_z_timepoints: tuple[int, ...] = (2, 10, 14, 24, 36)
 
     @classmethod
     def from_json(cls, path: str | Path | None) -> "AnalysisConfig":
@@ -66,8 +73,24 @@ class AnalysisConfig:
             raw["channels"] = channels
         if raw.get("timepoints") is not None:
             raw["timepoints"] = tuple(raw["timepoints"])
+        if raw.get("all_z_timepoints") is not None:
+            raw["all_z_timepoints"] = tuple(raw["all_z_timepoints"])
+        # Removed linear-slope settings are accepted but intentionally ignored.
+        raw.pop("slope_start_position", None)
+        raw.pop("slope_end_position", None)
         return cls(**raw)
 
     @property
     def zero_based_z(self) -> int:
         return self.z_index - 1 if self.z_is_one_based else self.z_index
+
+    def __post_init__(self) -> None:
+        allowed = {"reference_quadratic", "overlap_quadratic"}
+        if self.correction_method not in allowed:
+            raise ValueError(f"correction_method must be one of {sorted(allowed)}")
+        if self.overlap_min_signal < 0:
+            raise ValueError("overlap_min_signal must be non-negative")
+        if self.tanh_max_points < 4:
+            raise ValueError("tanh_max_points must be at least 4")
+        if any(timepoint < 0 for timepoint in self.all_z_timepoints):
+            raise ValueError("all_z_timepoints must be non-negative")

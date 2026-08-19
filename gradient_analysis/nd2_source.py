@@ -151,13 +151,19 @@ class ND2Source:
             raise ValueError(f"Invalid timepoint indices {invalid}; file has {count} timepoints.")
         return selected
 
-    def plane(self, timepoint: int, position: int, channel: ChannelConfig) -> np.ndarray:
+    def plane(
+        self,
+        timepoint: int,
+        position: int,
+        channel: ChannelConfig,
+        z_index_zero_based: int | None = None,
+    ) -> np.ndarray:
         """Read one YX plane, indexing absent singleton dimensions safely."""
         selection: list[int | slice] = []
         values = {
             "T": timepoint,
             "P": position,
-            "Z": self.config.zero_based_z,
+            "Z": self.config.zero_based_z if z_index_zero_based is None else z_index_zero_based,
             "C": self.channel_indices[channel.label],
         }
         for axis in self.axis_order:

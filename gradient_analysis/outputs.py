@@ -26,11 +26,6 @@ from .config import ChannelConfig
 from .processing import colorize_scaled, display_scale, normalized_profile_shape, smooth_profile
 
 
-def slope_table_value(slope: float) -> str:
-    """Format one Step 4 slope table value without repeating units."""
-    return f"{slope:.4g}"
-
-
 def _segments(profile: object) -> list[tuple[np.ndarray, np.ndarray]]:
     """Normalize legacy arrays and physical profile segments for plotting."""
     if isinstance(profile, np.ndarray):
@@ -107,7 +102,6 @@ def save_profile_plot(
     channels: tuple[ChannelConfig, ...],
     title: str,
     trendline_window: int | None = None,
-    bridge_fits: dict[str, dict[str, float | int | str | None]] | None = None,
 ) -> None:
     fig, ax = plt.subplots(figsize=(13, 5), constrained_layout=True)
     for channel in channels:
@@ -125,21 +119,6 @@ def save_profile_plot(
                 alpha=0.9,
                 label=f"{channel.label} smooth trend",
             )
-        if bridge_fits and channel.label in bridge_fits:
-            fit = bridge_fits[channel.label]
-            start = float(fit["x_start_mm"])
-            end = float(fit["x_end_mm"])
-            x = np.linspace(start, end, 200)
-            y = float(fit["slope_au_per_mm"]) * x + float(fit["intercept"])
-            ax.plot(
-                x,
-                y,
-                color=channel.plot_color,
-                linestyle=":",
-                linewidth=2.4,
-                label=f"{channel.label} P01-P06 slope={float(fit['slope_au_per_mm']):.4g}/mm",
-            )
-            ax.axvspan(start, end, color="gray", alpha=0.08, label="P01-P06 fit range")
     ax.set(title=title, xlabel="Position along device (mm)", ylabel="Mean intensity (a.u.)")
     ax.legend()
     ax.grid(alpha=0.2)
@@ -206,17 +185,10 @@ def save_timecourse_plot(
     channel: ChannelConfig,
     title: str,
     trendline_window: int | None = None,
-    bridge_records: list[dict[str, float | int | str | None]] | None = None,
 ) -> None:
     fig, ax = plt.subplots(figsize=(18, 8), constrained_layout=False)
     fig.subplots_adjust(left=0.07, right=0.76, top=0.9, bottom=0.18)
     colors = plt.colormaps["viridis"](np.linspace(0.0, 1.0, len(profiles)))
-    records_by_timepoint = {
-        int(record["timepoint"]): record
-        for record in bridge_records or []
-        if record["channel"] == channel.label
-    }
-    slope_span: tuple[float, float] | None = None
     for color, (timepoint, profile) in zip(colors, sorted(profiles.items())):
         segments = _segments(profile)
         _plot_measured_segments(ax, segments, color, f"t={timepoint}", linewidth=0.9, alpha=0.85)
@@ -230,22 +202,6 @@ def save_timecourse_plot(
                 linewidth=1.6,
                 alpha=0.95,
             )
-        record = records_by_timepoint.get(int(timepoint))
-        if record:
-            start = float(record["x_start_mm"])
-            end = float(record["x_end_mm"])
-            x = np.linspace(start, end, 200)
-            y = float(record["slope_au_per_mm"]) * x + float(record["intercept"])
-            ax.plot(
-                x,
-                y,
-                color=color,
-                linestyle=":",
-                linewidth=2.3,
-            )
-            slope_span = (start, end)
-    if slope_span is not None:
-        ax.axvspan(*slope_span, color="gray", alpha=0.10, label="P01-P06 fit range")
     ax.set(title=title, xlabel="Position along device (mm)", ylabel="Mean intensity (a.u.)")
     ax.grid(alpha=0.2)
     ax.legend(
@@ -255,51 +211,6 @@ def save_timecourse_plot(
         fontsize=7,
         frameon=True,
     )
-    if records_by_timepoint:
-        table_rows = [
-            [str(timepoint), slope_table_value(float(record["slope_au_per_mm"]))]
-            for timepoint, record in sorted(records_by_timepoint.items())
-        ]
-        table_ax = fig.add_axes([0.79, 0.18, 0.19, 0.72])
-        table_ax.axis("off")
-        table_ax.set_title(f"{channel.label} P01-P06 slope", fontsize=10, pad=8)
-        table = table_ax.table(
-            cellText=table_rows,
-            colLabels=["Timepoint", "Slope P01-P06\n(a.u./mm)"],
-            cellLoc="center",
-            colLoc="center",
-            loc="center",
-        )
-        table.auto_set_font_size(False)
-        table.set_fontsize(7 if len(table_rows) <= 25 else 5.5)
-        table.scale(1.0, 1.15 if len(table_rows) <= 25 else 0.75)
-        for (row, _column), cell in table.get_celld().items():
-            if row == 0:
-                cell.set_text_props(weight="bold")
-                cell.set_facecolor("#eeeeee")
-    fig.savefig(path, dpi=180)
-    plt.close(fig)
-
-
-def save_slope_timecourse_plot(
-    path: Path,
-    records: list[dict[str, float | int | str | None]],
-    channel: ChannelConfig,
-    title: str,
-) -> None:
-    """Plot P01-P06 gradient slope values across time for one channel."""
-    selected = sorted(
-        [record for record in records if record["channel"] == channel.label],
-        key=lambda record: int(record["timepoint"]),
-    )
-    fig, ax = plt.subplots(figsize=(8, 5), constrained_layout=True)
-    x = [int(record["timepoint"]) for record in selected]
-    y = [float(record["slope_au_per_mm"]) for record in selected]
-    ax.plot(x, y, marker="o", color=channel.plot_color, label=f"{channel.label} P01-P06 slope")
-    ax.axhline(0, color="black", linewidth=0.8, alpha=0.5)
-    ax.set(title=title, xlabel="Timepoint", ylabel="Slope P01-P06 (a.u./mm)")
-    ax.grid(alpha=0.2)
-    ax.legend()
     fig.savefig(path, dpi=180)
     plt.close(fig)
 
@@ -484,26 +395,222 @@ def write_rows_csv(path: Path, rows: list[dict[str, object]]) -> None:
         writer.writerows(rows)
 
 
-def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
-    """Write a simple table with stable column order."""
+def save_overlap_correction_plot(
+    path: Path,
+    illumination_profile: np.ndarray,
+    channel: ChannelConfig,
+    title: str,
+) -> None:
+    """Plot the fitted illumination and reciprocal correction curves."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = [
-        "timepoint",
-        "channel",
-        "start_position_label",
-        "end_position_label",
-        "start_position_one_based",
-        "end_position_one_based",
-        "x_start_mm",
-        "x_end_mm",
-        "slope_au_per_mm",
-        "intercept",
-        "r_squared",
-    ]
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
+    x = np.arange(illumination_profile.size)
+    fig, axes = plt.subplots(2, 1, figsize=(9, 7), sharex=True, constrained_layout=True)
+    axes[0].plot(x, illumination_profile, color=channel.plot_color, linewidth=2)
+    axes[0].axhline(1.0, color="black", linestyle="--", linewidth=0.8)
+    axes[0].set(title=title, ylabel="Relative illumination")
+    axes[1].plot(x, 1.0 / illumination_profile, color=channel.plot_color, linewidth=2)
+    axes[1].axhline(1.0, color="black", linestyle="--", linewidth=0.8)
+    axes[1].set(xlabel="Local camera x (pixels)", ylabel="Correction factor")
+    for axis in axes:
+        axis.grid(alpha=0.2)
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+
+
+def save_overlap_residual_plot(
+    path: Path,
+    rows: list[dict[str, object]],
+    channel: ChannelConfig,
+    title: str,
+) -> None:
+    """Plot median absolute overlap mismatch before and after correction."""
+    selected = [row for row in rows if row.get("channel") == channel.label]
+    labels = [f"t{int(row['timepoint']):03d} {row['position_pair']}" for row in selected]
+    before = [float(row["raw_median_abs_log_ratio"]) for row in selected]
+    after = [float(row["corrected_median_abs_log_residual"]) for row in selected]
+    x = np.arange(len(selected))
+    fig, ax = plt.subplots(figsize=(max(10, len(selected) * 0.08), 5), constrained_layout=True)
+    ax.plot(x, before, color="gray", alpha=0.65, linewidth=0.8, label="Before")
+    ax.plot(x, after, color=channel.plot_color, alpha=0.85, linewidth=0.8, label="After")
+    tick_step = max(1, len(labels) // 18)
+    ticks = x[::tick_step]
+    ax.set_xticks(ticks, [labels[i] for i in ticks], rotation=70, ha="right", fontsize=7)
+    ax.set(title=title, ylabel="Median absolute log-ratio", xlabel="Overlap sample")
+    ax.grid(alpha=0.2)
+    ax.legend()
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+
+
+def save_continuous_profile_plot(
+    path: Path,
+    profiles: dict[str, tuple[np.ndarray, np.ndarray]],
+    channels: tuple[ChannelConfig, ...],
+    title: str,
+    *,
+    normalized: bool,
+) -> None:
+    """Plot one feathered physical profile per channel."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(13, 5), constrained_layout=True)
+    for channel in channels:
+        x, y = profiles[channel.label]
+        ax.plot(x, y, color=channel.plot_color, linewidth=1.2, label=channel.label)
+    ax.set(
+        title=title,
+        xlabel="Position along device (mm)",
+        ylabel="Normalized intensity" if normalized else "Mean intensity (a.u.)",
+    )
+    if normalized:
+        ax.set_ylim(-0.02, 1.02)
+    ax.grid(alpha=0.2)
+    ax.legend()
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+
+
+def save_continuous_timecourse_plot(
+    path: Path,
+    profiles: dict[int, tuple[np.ndarray, np.ndarray]],
+    channel: ChannelConfig,
+    title: str,
+    *,
+    normalized: bool,
+) -> None:
+    """Plot feathered profiles for all selected timepoints without slope tables."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(15, 7), constrained_layout=True)
+    colors = plt.colormaps["viridis"](np.linspace(0.0, 1.0, len(profiles)))
+    for color, (timepoint, (x, y)) in zip(colors, sorted(profiles.items())):
+        ax.plot(x, y, color=color, linewidth=0.9, alpha=0.85, label=f"t={timepoint}")
+    ax.set(
+        title=title,
+        xlabel="Position along device (mm)",
+        ylabel="Normalized intensity" if normalized else "Mean intensity (a.u.)",
+    )
+    if normalized:
+        ax.set_ylim(-0.02, 1.02)
+    ax.grid(alpha=0.2)
+    ax.legend(ncol=8, fontsize=7, loc="upper center", bbox_to_anchor=(0.5, -0.10))
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+
+
+def save_tanh_fit_plot(
+    path: Path,
+    profiles: dict[str, tuple[np.ndarray, np.ndarray]],
+    fit_records: dict[str, dict[str, object]],
+    channels: tuple[ChannelConfig, ...],
+    title: str,
+) -> None:
+    """Plot normalized feathered profiles with their fitted tanh curves."""
+    from .processing import tanh_profile
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(13, 6), constrained_layout=True)
+    for channel in channels:
+        x, y = profiles[channel.label]
+        record = fit_records[channel.label]
+        ax.plot(x, y, color=channel.plot_color, linewidth=0.8, alpha=0.55, label=f"{channel.label} data")
+        fitted = tanh_profile(
+            x,
+            float(record["left_plateau"]),
+            float(record["right_plateau"]),
+            float(record["midpoint_mm"]),
+            float(record["width_mm"]),
+        )
+        slope = float(record["signed_slope_per_mm"])
+        ax.plot(x, fitted, color=channel.plot_color, linestyle="--", linewidth=2.2, label=f"{channel.label} tanh; slope={slope:.4g}/mm")
+        ax.axvline(float(record["midpoint_mm"]), color=channel.plot_color, linestyle=":", alpha=0.5)
+    ax.set(title=title, xlabel="Position along device (mm)", ylabel="Normalized intensity", ylim=(-0.02, 1.02))
+    ax.grid(alpha=0.2)
+    ax.legend()
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+
+
+def save_fit_metric_timecourse_plot(
+    path: Path,
+    records: list[dict[str, object]],
+    channels: tuple[ChannelConfig, ...],
+    metric: str,
+    ylabel: str,
+    title: str,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(9, 5), constrained_layout=True)
+    for channel in channels:
+        selected = sorted(
+            (record for record in records if record["channel"] == channel.label),
+            key=lambda record: int(record["timepoint"]),
+        )
+        ax.plot(
+            [int(record["timepoint"]) for record in selected],
+            [float(record[metric]) for record in selected],
+            marker="o",
+            color=channel.plot_color,
+            label=channel.label,
+        )
+    ax.set(title=title, xlabel="Timepoint", ylabel=ylabel)
+    ax.grid(alpha=0.2)
+    ax.legend()
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+
+
+def save_fit_metric_by_z_plot(
+    path: Path,
+    records: list[dict[str, object]],
+    channels: tuple[ChannelConfig, ...],
+    timepoint: int,
+    metric: str,
+    ylabel: str,
+    title: str,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(9, 5), constrained_layout=True)
+    for channel in channels:
+        selected = sorted(
+            (record for record in records if record["channel"] == channel.label and int(record["timepoint"]) == timepoint),
+            key=lambda record: int(record["z_index_zero_based"]),
+        )
+        ax.plot(
+            [int(record["z_index_one_based"]) for record in selected],
+            [float(record[metric]) for record in selected],
+            marker="o",
+            color=channel.plot_color,
+            label=channel.label,
+        )
+    ax.set(title=title, xlabel="Z plane (one-based)", ylabel=ylabel)
+    ax.grid(alpha=0.2)
+    ax.legend()
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+
+
+def save_fit_heatmap(
+    path: Path,
+    records: list[dict[str, object]],
+    channel: ChannelConfig,
+    timepoints: tuple[int, ...],
+    z_count: int,
+    metric: str,
+    title: str,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    values = np.full((len(timepoints), z_count), np.nan, dtype=float)
+    timepoint_index = {timepoint: index for index, timepoint in enumerate(timepoints)}
+    for record in records:
+        if record["channel"] == channel.label:
+            values[timepoint_index[int(record["timepoint"])], int(record["z_index_zero_based"])] = float(record[metric])
+    fig, ax = plt.subplots(figsize=(11, 4), constrained_layout=True)
+    image = ax.imshow(values, aspect="auto", origin="lower", cmap="coolwarm" if metric == "signed_slope_per_mm" else "viridis")
+    ax.set(title=title, xlabel="Z plane (one-based)", ylabel="Timepoint")
+    ax.set_xticks(np.arange(z_count), np.arange(1, z_count + 1), fontsize=7)
+    ax.set_yticks(np.arange(len(timepoints)), timepoints)
+    fig.colorbar(image, ax=ax, label=metric)
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
 
 
 def write_json(path: Path, data: object) -> None:

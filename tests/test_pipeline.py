@@ -5,10 +5,24 @@ from pathlib import Path
 
 import numpy as np
 
+from gradient_analysis.config import AnalysisConfig
 from gradient_analysis.pipeline import _position_max_difference_record, _timepoint_folder
 
 
 class PipelineTests(unittest.TestCase):
+    def test_overlap_correction_is_the_revised_default(self):
+        self.assertEqual(AnalysisConfig().correction_method, "overlap_quadratic")
+        self.assertEqual(
+            AnalysisConfig(correction_method="overlap_quadratic").correction_method,
+            "overlap_quadratic",
+        )
+
+    def test_legacy_slope_config_keys_are_ignored(self):
+        path = Path.cwd() / ".test_outputs" / "legacy_slope_config.json"
+        path.parent.mkdir(exist_ok=True)
+        path.write_text('{"slope_start_position": 1, "slope_end_position": 6}', encoding="utf-8")
+        self.assertEqual(AnalysisConfig.from_json(path).correction_method, "overlap_quadratic")
+
     def test_step1_timepoint_folder_is_zero_padded(self):
         self.assertEqual(_timepoint_folder(Path("step_01_stitched_images"), 18), Path("step_01_stitched_images") / "t018")
 

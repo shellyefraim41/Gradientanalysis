@@ -6,5 +6,6 @@ __pycache__/
 outputs/
 *.nd2
 .pytest_cache/
+.pptx_tmp/
 .test_outputs/
 tmp*/

@@ -2,91 +2,66 @@
 
 Memory-conscious analysis of a Nikon ND2 time course containing multiple stage
 positions, Z planes, and GFP/Cy5 channels. The program reads one 2-D plane at a
-time, so it does not attempt to load the approximately 250 GB acquisition into
-RAM. It uses the maintained `nd2` package's delayed Dask reader.
+time rather than loading the complete acquisition into RAM.
 
 ## Analysis
 
-The default configuration treats `Z=15` as the fifteenth plane (zero-based
-index 14), sorts stage positions by descending metadata X, and processes every
-timepoint. Descending X matches this experiment's recorded left-to-right order;
-`position_x_order` can also be set to `ascending` or `acquisition`.
+The experiment configuration treats `Z=15` as one-based (ND2 index 14), sorts
+stage positions left-to-right from their metadata, and processes all 37
+timepoints. Every tile is processed in this order:
 
-1. Subtract the microscope background from every image first:
+`raw - 100, floored at 0 -> overlap-derived X correction -> average over Y`
 
-   `signal(y, x) = max(raw(y, x) - 100, 0)`
+Adjacent fields overlap by about 21.6% (approximately 498 columns). Matching
+pixels from all adjacent overlaps, including the measured Y displacement, are
+used to robustly estimate one positive quadratic camera-X illumination profile
+for GFP and one for Cy5. Dark and detector-clipped pixels are excluded. Each
+illumination profile is normalized to median 1 and reused unchanged for every
+timepoint.
 
-   All saved measurement values and subsequent analyses use this zero-based
-   signal; the background is not added back. Save a left-to-right contact sheet
-   for image inspection. These Step 1 images
-   still place the positions directly beside each other, because they are meant
-   for quick visual checking, not for distance measurement. Save a raw uint16
-   TIFF and display-scaled PNG for each channel, plus a GFP/Cy5 merge PNG.
-   Single-channel `_preview.png` files are colorized for viewing: GFP is green
-   and Cy5 is magenta.
-2. Average each position image over Y and save the two channel x profiles on one
-   graph using the real physical x-axis in millimeters. Stage metadata X values
-   are treated as image centers, image columns are converted using the pixel
-   size metadata, and the left edge of P01 is defined as `x = 0 mm`. Solid lines
-   show measured image data only. Dashed lines across gaps are visual
-   interpolation over unmeasured space; they are not added to the saved data or
-   used for slope fitting.
-3. Work from the separate position images. For each channel, scan all selected
-   timepoints and positions and choose one fixed correction reference from
-   bright, unsaturated candidates whose normalized local-x profile shape changes
-   least over time. Fit a quadratic trendline to that single reference profile
-   and calculate:
+After Y averaging, duplicate physical locations are combined with complementary
+cosine weights. A tile receives more weight farther from its camera edge; the
+weights are equal at the overlap midpoint and always sum to 1. The result is one
+continuous physical-X profile with no double-counting.
 
-   `corrected(y, x) = signal(y, x) * median(fitted_laser_profile) / fitted_laser_profile(x)`
+The output steps are:
 
-   The quadratic includes `a`, `b`, and `c` in `y = ax^2 + bx + c`; `c` is its
-   fitted intensity baseline. The fitted trendline is used as the estimated
-   microscope laser profile for that channel. The same correction curve is then reused for every timepoint
-   and every position in that channel. This avoids changing the correction from
-   timepoint to timepoint and reduces the chance of flipping the chemical
-   gradient shape. Save viewer-compatible corrected uint16 TIFF tiles, a
-   corrected contact-sheet TIFF/PNG, and a normalization graph with three
-   panels: raw local-x profiles, corrected local-x profiles, and the same
-   corrected values placed on the physical-mm device axis. The local-x panel can
-   look much straighter because it shows each field of view separately; the
-   physical-mm panel preserves the between-position gradient. Graphs are
-   calculated from float corrected values before TIFF rounding. Candidate
-   reference scores and selected-reference stability plots are saved under
-   `step_03_illumination_corrected/reference_selection/`. A diagnostic
-   `smoothed_profile_comparison` folder also compares the conservative
-   quadratic laser fit with a more edge-following correction that uses the
-   smoothed reference profile directly. On the 2-D flat-field experiment branch,
-   `flatfield_2d_comparison` additionally tests correction from a smoothed 2-D
-   reference tile illumination map.
-4. Save one graph per channel containing the corrected physical-mm x profile for
-   every timepoint. Solid line segments are measured image data. Dashed lines
-   span the unmeasured gaps between positions as visual interpolation only. The
-   P01-P06 slope range is shaded gray, each timepoint has a dotted P01-P06
-   linear fit, and a side table lists gradient slope by timepoint with units in
-   the table header.
-5. Save one GFP/Cy5 graph per timepoint, matching Step 2 but using corrected
-   values. The P01-P06 fit is overlaid for each channel. Raw versions of the
-   Step 4, Step 5, and Step 6 analyses are saved in `raw_comparison` folders so
-   pilot runs can be checked before running all timepoints.
-6. Calculate the corrected gradient slope from measured pixels in P01 through
-   P06, excluding P07. Save one CSV/JSON table with slope in `a.u./mm`,
-   intercept, and R². Save one slope-over-time graph per channel.
-7. Before illumination correction, calculate background-subtracted maximum
-   intensity differences over time. GFP uses `max(P02) - max(P05)` and Cy5 uses
-   `max(P05) - max(P02)`. Save both channel series on one graph and save the
-   values in CSV and JSON.
+1. Background-subtracted left-to-right contact sheets and GFP/Cy5 previews.
+2. Continuous cosine-feathered profiles before illumination correction.
+3. Corrected uint16 TIFF tiles/contact sheets and overlap-fit diagnostics.
+4. Corrected, normalized timecourse profiles, one plot per channel.
+5. Corrected, normalized GFP/Cy5 profile for each timepoint.
+6. Robust hyperbolic-tangent fits and gradient summaries.
+7. The existing background-subtracted P02/P05 maximum-difference analysis.
+8. The same corrected, feathered, normalized analysis across every Z plane for
+   `t002`, `t010`, `t014`, `t024`, and `t036`. Step 8 also saves corrected
+   display-only stitched PNGs under `stitched_images/tXXX/`: one GFP image, one
+   Cy5 image, and one GFP/Cy5 merge for each Z plane. These PNGs use local
+   percentile scaling and are not measurement data; duplicate all-Z TIFF stacks
+   are not written.
 
-TIFF files contain measurement values. Files ending in `_preview.png` are 8-bit
-colorized display copies using local per-image scaling, so dim timepoints are
-easy to inspect. Files ending in `_global_preview.png` use one shared range per
-channel across the selected timepoints, so they are better for fair visual
-comparison. Additional `_grayscale_preview.png` files are saved for grayscale
-viewing. Display limits are derived from the 1st and 99.8th percentiles and are
-recorded in `run_metadata.json`.
+For Steps 4-6, one maximum is calculated from all corrected, feathered Z15
+profiles for each channel. Every GFP profile is divided by the GFP maximum and
+every Cy5 profile by the Cy5 maximum. Corrected TIFFs remain in intensity units;
+normalization applies only to analytical profiles and fits. Step 8 calculates
+its own two normalization constants across its selected T-by-Z collection.
 
-P07 is not omitted. In the pilot at t=0 its GFP signal is near background and
-its Cy5 signal is weak, so it is expected to remain darker than the other
-positions even after consistent display scaling.
+Steps 6 and 8 fit the full profile, reduced to at most 1,024 equal-width median
+bins, to:
+
+`y(x) = left + (right-left)/2 * [1 + tanh((x-midpoint)/width)]`
+
+The signed slope is `(right-left)/(2*width)` in normalized intensity per
+millimeter. CSV and JSON tables also contain the absolute slope, plateaus,
+amplitude, midpoint, width, R², RMSE, optimizer status, and QC flags. The old
+P01-P06 linear-slope calculation is no longer generated. Its legacy config keys
+are accepted and ignored so older configuration files still load.
+
+TIFF files contain measurement values. Files ending in `_preview.png` are
+8-bit display copies. Local previews make each timepoint easy to inspect;
+`_global_preview.png` files use one shared channel-specific range for fair visual
+comparison. Display limits and all analysis settings are recorded in
+`run_metadata.json`.
 
 ## Installation and use
 
@@ -99,19 +74,14 @@ pip install -r requirements.txt
 python GradientAnalysis.py "D:\path\experiment.nd2" --config example_config.json --output outputs
 ```
 
-Each invocation creates a new folder named
-`run_<original-name>_<date_time>`. It contains one folder for every requested
-step and `run_metadata.json`, which records dimensions, channel mapping,
-position order, physical-mm position ranges, fixed correction references, and
-the exact Z index used. Existing runs are not overwritten.
+Each invocation creates a new `run_<original-name>_<date_time>` directory, so
+existing completed runs are not overwritten. Metadata records the channel and
+position mapping, overlap correction, feathering, normalization constants, tanh
+model and slope definition, all-Z settings, and Z indices.
 
-For a quick trial, set `"timepoints": [0, 18]` in a copied config. Verify the
-reported channel mapping, left-to-right position order, physical-mm spacing,
-Step 3 fixed correction reference, and raw-versus-corrected comparison outputs
-before starting all 49 timepoints.
-
-The included `pilot_config.json` is already restricted to `t=0` and `t=18` for
-this check.
+Use `exp106_2026_07_30_overlap_pilot_config.json` for a two-timepoint Z15 trial,
+`exp106_2026_07_30_all_z_pilot_config.json` for a one-timepoint all-Z trial, and
+`exp106_2026_07_30_overlap_config.json` for the full experiment.
 
 ## Tests
 

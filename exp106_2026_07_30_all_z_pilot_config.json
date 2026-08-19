@@ -1,0 +1,17 @@
+{
+  "z_index": 15,
+  "z_is_one_based": true,
+  "timepoints": [2],
+  "position_x_order": "descending",
+  "microscope_background": 100.0,
+  "apply_illumination_correction": true,
+  "correction_method": "overlap_quadratic",
+  "overlap_min_signal": 5.0,
+  "save_corrected_tiles": false,
+  "feather_overlaps": true,
+  "normalize_profiles": true,
+  "tanh_fit_enabled": true,
+  "tanh_max_points": 1024,
+  "all_z_enabled": true,
+  "all_z_timepoints": [2]
+}

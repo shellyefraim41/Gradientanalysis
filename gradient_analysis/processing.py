@@ -52,21 +52,190 @@ def physical_x_axes_mm(
     ]
 
 
-def flatten_segments(
-    x_segments: list[np.ndarray],
-    y_segments: list[np.ndarray],
-    start_index: int = 0,
-    end_index: int | None = None,
+def feather_profiles(
+    x_axes: list[np.ndarray], profiles: list[np.ndarray]
+) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
+    """Interpolate onto one physical grid and blend overlaps with cosine weights."""
+    if not x_axes or len(x_axes) != len(profiles):
+        raise ValueError("x_axes and profiles must be non-empty and equal length.")
+    if any(axis.ndim != 1 or profile.ndim != 1 or axis.size != profile.size for axis, profile in zip(x_axes, profiles)):
+        raise ValueError("Every physical axis must match its one-dimensional profile.")
+    pixel_steps = np.concatenate([np.diff(axis) for axis in x_axes if axis.size > 1])
+    pixel_mm = float(np.median(pixel_steps))
+    if not np.isfinite(pixel_mm) or pixel_mm <= 0:
+        raise ValueError("Physical axes must be strictly increasing.")
+    origin = min(float(axis[0]) for axis in x_axes)
+    fractional_starts = [(float(axis[0]) - origin) / pixel_mm for axis in x_axes]
+    starts = [int(round(value)) for value in fractional_starts]
+    alignment_errors = [
+        abs(value - start) for value, start in zip(fractional_starts, starts)
+    ]
+    end = max(float(axis[-1]) for axis in x_axes)
+    total = int(np.floor((end - origin) / pixel_mm + 1e-9)) + 1
+    axis = origin + np.arange(total, dtype=np.float64) * pixel_mm
+    values = [
+        np.interp(axis, local_x, profile.astype(np.float64), left=np.nan, right=np.nan)
+        for local_x, profile in zip(x_axes, profiles)
+    ]
+    tile_weights = [np.isfinite(value).astype(np.float64) for value in values]
+    overlaps: list[int] = []
+    for index in range(len(profiles) - 1):
+        overlap_mask = np.isfinite(values[index]) & np.isfinite(values[index + 1])
+        overlap_indices = np.flatnonzero(overlap_mask)
+        overlap = int(overlap_indices.size)
+        if overlap == 0 and float(x_axes[index][-1]) < float(x_axes[index + 1][0]):
+            raise ValueError("Profiles contain a physical gap and cannot be feathered.")
+        overlaps.append(overlap)
+        if overlap:
+            phase = np.linspace(0.0, np.pi, overlap, dtype=np.float64)
+            tile_weights[index][overlap_indices] *= 0.5 * (1.0 + np.cos(phase))
+            tile_weights[index + 1][overlap_indices] *= 0.5 * (1.0 - np.cos(phase))
+    weighted = np.zeros(total, dtype=np.float64)
+    weights = np.zeros(total, dtype=np.float64)
+    for value, weight in zip(values, tile_weights):
+        valid = np.isfinite(value)
+        weighted[valid] += value[valid] * weight[valid]
+        weights[valid] += weight[valid]
+    if np.any(weights <= 0):
+        raise ValueError("Feathering produced uncovered physical coordinates.")
+    return axis, weighted / weights, {
+        "method": "cosine_feather",
+        "placement": "linear interpolation from subpixel stage coordinates onto the camera-pixel grid",
+        "pixel_size_mm": pixel_mm,
+        "position_start_indices": starts,
+        "position_start_coordinates_px": fractional_starts,
+        "overlap_widths_px": overlaps,
+        "output_width_px": total,
+        "maximum_alignment_error_px": max(alignment_errors, default=0.0),
+    }
+
+
+def profile_normalization_constants(
+    profiles_by_channel: dict[str, list[np.ndarray]],
+) -> dict[str, float]:
+    """Return one exact positive maximum per channel across 1-D profiles."""
+    constants: dict[str, float] = {}
+    for channel, profiles in profiles_by_channel.items():
+        if not profiles:
+            raise ValueError(f"No profiles supplied for channel {channel}.")
+        maximum = max(float(np.nanmax(profile)) for profile in profiles)
+        if not np.isfinite(maximum) or maximum <= 0:
+            raise ValueError(f"Channel {channel} has no positive finite profile maximum.")
+        constants[channel] = maximum
+    return constants
+
+
+def tanh_profile(
+    x: np.ndarray,
+    left: float,
+    right: float,
+    midpoint: float,
+    width: float,
+) -> np.ndarray:
+    """Evaluate the four-parameter hyperbolic-tangent gradient model."""
+    return left + 0.5 * (right - left) * (1.0 + np.tanh((x - midpoint) / width))
+
+
+def _median_bin_profile(
+    x: np.ndarray, y: np.ndarray, max_points: int
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Concatenate selected measured profile segments for fitting."""
-    if end_index is None:
-        end_index = len(x_segments) - 1
-    if not (0 <= start_index <= end_index < len(x_segments) == len(y_segments)):
-        raise ValueError("Invalid segment range for flattening.")
+    keep = np.isfinite(x) & np.isfinite(y)
+    x = x[keep].astype(np.float64)
+    y = y[keep].astype(np.float64)
+    if x.size < 4:
+        raise ValueError("At least four finite profile points are required.")
+    order = np.argsort(x)
+    x, y = x[order], y[order]
+    if x.size <= max_points:
+        return x, y
+    edges = np.linspace(0, x.size, max_points + 1, dtype=int)
     return (
-        np.concatenate(x_segments[start_index : end_index + 1]),
-        np.concatenate(y_segments[start_index : end_index + 1]),
+        np.array([np.median(x[edges[i] : edges[i + 1]]) for i in range(max_points)]),
+        np.array([np.median(y[edges[i] : edges[i + 1]]) for i in range(max_points)]),
     )
+
+
+def fit_tanh_profile(
+    x: np.ndarray,
+    y: np.ndarray,
+    *,
+    max_points: int = 1024,
+    pixel_size_mm: float | None = None,
+) -> dict[str, object]:
+    """Robustly fit a normalized profile and report its midpoint slope."""
+    from scipy.optimize import least_squares
+
+    fit_x, fit_y = _median_bin_profile(x, y, max_points)
+    span = float(fit_x[-1] - fit_x[0])
+    if span <= 0:
+        raise ValueError("Physical x coordinates must span a positive distance.")
+    edge_count = max(1, int(np.ceil(0.05 * fit_y.size)))
+    initial_left = float(np.clip(np.median(fit_y[:edge_count]), -0.1, 1.1))
+    initial_right = float(np.clip(np.median(fit_y[-edge_count:]), -0.1, 1.1))
+    halfway = 0.5 * (initial_left + initial_right)
+    initial_midpoint = float(fit_x[np.argmin(np.abs(fit_y - halfway))])
+    minimum_width = max(float(pixel_size_mm or np.median(np.diff(fit_x))), np.finfo(float).eps)
+    lower = np.array([-0.1, -0.1, fit_x[0], minimum_width], dtype=np.float64)
+    upper = np.array([1.1, 1.1, fit_x[-1], 2.0 * span], dtype=np.float64)
+    initial = np.array(
+        [initial_left, initial_right, initial_midpoint, max(span / 10.0, minimum_width * 2.0)]
+    )
+    initial = np.minimum(np.maximum(initial, lower + 1e-9), upper - 1e-9)
+    try:
+        result = least_squares(
+            lambda parameters: tanh_profile(fit_x, *parameters) - fit_y,
+            initial,
+            bounds=(lower, upper),
+            loss="soft_l1",
+            f_scale=0.02,
+            max_nfev=5000,
+        )
+        parameters = result.x
+        optimizer_success = bool(result.success)
+        optimizer_message = str(result.message)
+    except Exception as error:  # retain a flagged record instead of aborting the run
+        parameters = initial
+        optimizer_success = False
+        optimizer_message = f"{type(error).__name__}: {error}"
+    left, right, midpoint, width = (float(value) for value in parameters)
+    predicted = tanh_profile(fit_x, left, right, midpoint, width)
+    residual = fit_y - predicted
+    ss_res = float(np.sum(residual * residual))
+    ss_tot = float(np.sum((fit_y - np.mean(fit_y)) ** 2))
+    r_squared = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
+    amplitude = right - left
+    signed_slope = amplitude / (2.0 * width)
+    tolerance = 1e-4
+    at_bound = bool(
+        np.any(np.isclose(parameters, lower, rtol=0, atol=tolerance))
+        or np.any(np.isclose(parameters, upper, rtol=0, atol=tolerance))
+    )
+    flags: list[str] = []
+    if not optimizer_success:
+        flags.append("non_convergence")
+    if at_bound:
+        flags.append("parameter_at_bound")
+    if abs(amplitude) < 0.05:
+        flags.append("low_amplitude")
+    values = np.array([left, right, midpoint, width, signed_slope, r_squared])
+    if not np.all(np.isfinite(values)):
+        flags.append("non_finite_result")
+    return {
+        "left_plateau": left,
+        "right_plateau": right,
+        "amplitude": amplitude,
+        "midpoint_mm": midpoint,
+        "width_mm": width,
+        "signed_slope_per_mm": signed_slope,
+        "absolute_slope_per_mm": abs(signed_slope),
+        "r_squared": r_squared,
+        "rmse": float(np.sqrt(np.mean(residual * residual))),
+        "optimizer_success": optimizer_success,
+        "optimizer_message": optimizer_message,
+        "fit_valid": not flags,
+        "qc_flags": flags,
+        "fit_point_count": int(fit_x.size),
+    }
 
 
 def smooth_profile(profile: np.ndarray, window: int) -> np.ndarray:
@@ -230,6 +399,111 @@ def correct_tile(tile: np.ndarray, curve: np.ndarray) -> np.ndarray:
     return tile.astype(np.float32) * curve.astype(np.float32)[np.newaxis, :]
 
 
+def overlap_log_ratio_samples(
+    left_tile: np.ndarray,
+    right_tile: np.ndarray,
+    x_offset_px: int,
+    y_shift_px: int,
+    min_signal: float,
+    saturation_signal: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, float | int]]:
+    """Return robust column-wise log ratios from the physical tile overlap.
+
+    ``x_offset_px`` maps local x=0 in the right tile to that local x in the
+    left tile. ``y_shift_px`` maps a right-tile row to the corresponding
+    left-tile row. Medians across Y make the fit resistant to isolated pixels.
+    """
+    if left_tile.shape != right_tile.shape or left_tile.ndim != 2:
+        raise ValueError("Overlap tiles must be equally sized 2-D arrays.")
+    height, width = left_tile.shape
+    if not 0 < x_offset_px < width:
+        raise ValueError("x_offset_px must produce a non-empty overlap.")
+    overlap = width - x_offset_px
+    if abs(y_shift_px) >= height:
+        raise ValueError("y_shift_px leaves no overlapping rows.")
+    if y_shift_px >= 0:
+        left_rows = slice(y_shift_px, height)
+        right_rows = slice(0, height - y_shift_px)
+    else:
+        left_rows = slice(0, height + y_shift_px)
+        right_rows = slice(-y_shift_px, height)
+    left = left_tile[left_rows, x_offset_px:].astype(np.float64)
+    right = right_tile[right_rows, :overlap].astype(np.float64)
+    valid = (
+        (left > min_signal)
+        & (right > min_signal)
+        & (left < saturation_signal)
+        & (right < saturation_signal)
+    )
+    log_ratio = np.full(overlap, np.nan, dtype=np.float64)
+    valid_counts = np.count_nonzero(valid, axis=0)
+    for column in np.flatnonzero(valid_counts):
+        mask = valid[:, column]
+        log_ratio[column] = float(np.median(np.log(left[mask, column] / right[mask, column])))
+    keep = np.isfinite(log_ratio)
+    x_left = np.flatnonzero(keep).astype(np.float64) + x_offset_px
+    x_right = np.flatnonzero(keep).astype(np.float64)
+    diagnostics: dict[str, float | int] = {
+        "x_offset_px": x_offset_px,
+        "overlap_width_px": overlap,
+        "y_shift_px": y_shift_px,
+        "valid_pixel_count": int(valid.sum()),
+        "valid_column_count": int(keep.sum()),
+        "raw_median_abs_log_ratio": float(np.median(np.abs(log_ratio[keep]))) if keep.any() else float("nan"),
+    }
+    return x_left, x_right, log_ratio[keep], diagnostics
+
+
+def fit_overlap_log_quadratic(
+    tile_width: int,
+    x_left: np.ndarray,
+    x_right: np.ndarray,
+    log_ratios: np.ndarray,
+    iterations: int = 8,
+) -> tuple[np.ndarray, dict[str, object]]:
+    """Fit a positive, median-normalized illumination profile from overlaps."""
+    if not (x_left.size == x_right.size == log_ratios.size) or x_left.size < 3:
+        raise ValueError("At least three equal-length overlap samples are required.")
+    center = (tile_width - 1) / 2.0
+    scale = max(center, 1.0)
+    a = (x_left - center) / scale
+    b = (x_right - center) / scale
+    design = np.column_stack((a - b, a * a - b * b))
+    weights = np.ones(log_ratios.size, dtype=np.float64)
+    coefficients = np.zeros(2, dtype=np.float64)
+    for _ in range(iterations):
+        root_w = np.sqrt(weights)
+        coefficients, *_ = np.linalg.lstsq(
+            design * root_w[:, None], log_ratios * root_w, rcond=None
+        )
+        residual = log_ratios - design @ coefficients
+        median = float(np.median(residual))
+        mad = float(np.median(np.abs(residual - median)))
+        robust_scale = max(1.4826 * mad, np.finfo(float).eps)
+        normalized = np.abs(residual - median) / (1.345 * robust_scale)
+        weights = np.ones_like(normalized)
+        high = normalized > 1.0
+        weights[high] = 1.0 / normalized[high]
+    local_x = (np.arange(tile_width, dtype=np.float64) - center) / scale
+    log_profile = coefficients[0] * local_x + coefficients[1] * local_x * local_x
+    log_profile -= float(np.median(log_profile))
+    profile = np.exp(log_profile)
+    residual = log_ratios - design @ coefficients
+    details: dict[str, object] = {
+        "model": "exp(linear*x + quadratic*x^2)",
+        "normalized_x_center_px": center,
+        "normalized_x_scale_px": scale,
+        "linear_coefficient": float(coefficients[0]),
+        "quadratic_coefficient": float(coefficients[1]),
+        "profile_median": float(np.median(profile)),
+        "profile_min": float(np.min(profile)),
+        "profile_max": float(np.max(profile)),
+        "sample_count": int(log_ratios.size),
+        "median_abs_log_residual": float(np.median(np.abs(residual))),
+    }
+    return profile, details
+
+
 def subtract_background_floor(image: np.ndarray, background: float) -> np.ndarray:
     """Subtract a constant microscope background and floor at zero."""
     return np.maximum(image.astype(np.float32) - float(background), 0.0)
@@ -309,49 +583,6 @@ def image_percentile_range(
     if high <= low:
         high = low + 1
     return int(round(float(low))), int(round(float(high)))
-
-
-def position_span(position_list_index: int, tile_width: int) -> tuple[int, int]:
-    """Return the stitched x start/end pixel coordinates for one position."""
-    if position_list_index < 0:
-        raise ValueError("Position list index must be non-negative.")
-    if tile_width <= 0:
-        raise ValueError("Tile width must be positive.")
-    start = int(position_list_index) * int(tile_width)
-    return start, start + int(tile_width)
-
-
-def linear_fit_xy(x: np.ndarray, y: np.ndarray) -> dict[str, float]:
-    """Fit y = slope*x + intercept and report slope plus R²."""
-    if x.size != y.size or x.size < 2:
-        raise ValueError("x and y must have equal length >= 2.")
-    x = x.astype(np.float64)
-    y = y.astype(np.float64)
-    slope, intercept = np.polyfit(x, y, 1)
-    fitted = slope * x + intercept
-    ss_res = float(np.sum((y - fitted) ** 2))
-    ss_tot = float(np.sum((y - float(np.mean(y))) ** 2))
-    r_squared = 1.0 if ss_tot == 0.0 else 1.0 - ss_res / ss_tot
-    return {
-        "slope": float(slope),
-        "intercept": float(intercept),
-        "r_squared": float(r_squared),
-    }
-
-
-def linear_fit(profile: np.ndarray, pixel_size_um: float | None = None) -> dict[str, float | None]:
-    """Fit y = slope*x + intercept using pixel coordinate x and report R²."""
-    y = profile.astype(np.float64)
-    x = np.arange(y.size, dtype=np.float64)
-    fit = linear_fit_xy(x, y)
-    slope = fit["slope"]
-    slope_per_um = None if not pixel_size_um else float(slope / pixel_size_um)
-    return {
-        "slope_per_pixel": float(slope),
-        "slope_per_um": slope_per_um,
-        "intercept": fit["intercept"],
-        "r_squared": fit["r_squared"],
-    }
 
 
 def split_equal_width(image: np.ndarray, count: int) -> list[np.ndarray]:

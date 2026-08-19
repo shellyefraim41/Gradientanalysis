@@ -1,7 +1,7 @@
 {
   "z_index": 15,
   "z_is_one_based": true,
-  "timepoints": [0, 18],
+  "timepoints": null,
   "position_x_order": "descending",
   "reference_positions": {
     "GFP": null,
@@ -11,15 +11,12 @@
   "trendline_window_px": 201,
   "correction_fit_degree": 2,
   "bridge_position": 4,
+  "slope_start_position": 1,
+  "slope_end_position": 6,
   "microscope_background": 100.0,
+  "apply_illumination_correction": false,
   "saturation_fraction_threshold": 0.001,
   "preview_low_percentile": 1.0,
   "preview_high_percentile": 99.8,
-  "save_corrected_tiles": true,
-  "apply_illumination_correction": true,
-  "correction_method": "overlap_quadratic",
-  "feather_overlaps": true,
-  "normalize_profiles": true,
-  "tanh_fit_enabled": true,
-  "all_z_enabled": false
+  "save_corrected_tiles": false
 }

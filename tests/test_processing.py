@@ -1,6 +1,7 @@
 """Tests for the data-independent analysis functions."""
 
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -11,17 +12,18 @@ from gradient_analysis.processing import (
     correct_tile_2d,
     correction_curve,
     empty_uint16_histogram,
+    fit_overlap_log_quadratic,
+    fit_tanh_profile,
+    feather_profiles,
     fitted_illumination_profile,
     histogram_percentile_range,
     image_percentile_range,
-    linear_fit,
-    linear_fit_xy,
-    flatten_segments,
     merge_rgb,
+    overlap_log_ratio_samples,
     physical_x_axes_mm,
     profile_curvature,
+    profile_normalization_constants,
     reference_candidate_score,
-    position_span,
     smoothed_illumination_image,
     smoothed_illumination_profile,
     subtract_background_floor,
@@ -32,6 +34,103 @@ from gradient_analysis.processing import (
     update_uint16_histogram,
     x_profile,
 )
+
+
+class OverlapCorrectionTests(unittest.TestCase):
+    def test_recovers_profile_with_y_shift_and_gradient(self):
+        height, width, offset, y_shift = 80, 120, 94, 7
+        overlap = width - offset
+        local_x = (np.arange(width) - (width - 1) / 2) / ((width - 1) / 2)
+        illumination = np.exp(0.08 * local_x - 0.28 * local_x**2)
+        global_x = np.arange(width + offset, dtype=float)
+        scene = 800.0 + 2.5 * global_x
+        left = np.broadcast_to(scene[:width] * illumination, (height, width)).copy()
+        right = np.broadcast_to(scene[offset : offset + width] * illumination, (height, width)).copy()
+        xl, xr, ratios, details = overlap_log_ratio_samples(
+            left, right, offset, y_shift, 5.0, 65535.0
+        )
+        fitted, model = fit_overlap_log_quadratic(width, xl, xr, ratios)
+        expected = illumination / np.median(illumination)
+        np.testing.assert_allclose(fitted, expected, rtol=0.02, atol=0.01)
+        corrected_left = correct_tile(left, 1.0 / fitted)
+        corrected_right = correct_tile(right, 1.0 / fitted)
+        np.testing.assert_allclose(
+            corrected_left[y_shift:, offset:], corrected_right[:-y_shift, :overlap], rtol=0.02
+        )
+        self.assertEqual(details["overlap_width_px"], overlap)
+        self.assertEqual(model["sample_count"], overlap)
+
+    def test_excludes_dark_and_clipped_pixels(self):
+        left = np.full((5, 10), 100.0)
+        right = np.full((5, 10), 50.0)
+        left[:, 7] = 0.0
+        right[:, 1] = 65535.0
+        _, _, ratios, details = overlap_log_ratio_samples(left, right, 7, 0, 5.0, 65535.0)
+        self.assertEqual(ratios.size, 1)
+        self.assertEqual(details["valid_column_count"], 1)
+
+
+class FeatherAndTanhTests(unittest.TestCase):
+    def test_cosine_feather_is_continuous_and_uses_one_physical_grid(self):
+        axes = [np.arange(6, dtype=float), np.arange(4, 10, dtype=float)]
+        profiles = [np.full(6, 10.0), np.full(6, 20.0)]
+        x, combined, details = feather_profiles(axes, profiles)
+        np.testing.assert_array_equal(x, np.arange(10, dtype=float))
+        np.testing.assert_allclose(combined, [10, 10, 10, 10, 10, 20, 20, 20, 20, 20])
+        self.assertEqual(details["overlap_widths_px"], [2])
+
+    def test_cosine_feather_preserves_identical_gradient(self):
+        axes = [np.arange(6, dtype=float), np.arange(4, 10, dtype=float)]
+        profiles = [2 * axes[0] + 3, 2 * axes[1] + 3]
+        x, combined, _ = feather_profiles(axes, profiles)
+        np.testing.assert_allclose(combined, 2 * x + 3)
+
+    def test_unequal_overlaps_remain_gap_free(self):
+        axes = [np.arange(7, dtype=float), np.arange(4, 11, dtype=float), np.arange(9, 16, dtype=float)]
+        profiles = [axis.copy() for axis in axes]
+        x, combined, details = feather_profiles(axes, profiles)
+        np.testing.assert_allclose(combined, x)
+        self.assertEqual(details["overlap_widths_px"], [3, 2])
+        self.assertEqual(x.size, 16)
+
+    def test_channel_normalization_uses_one_global_profile_maximum(self):
+        profiles = {"GFP": [np.array([1.0, 5.0]), np.array([2.0, 10.0])],
+                    "Cy5": [np.array([3.0, 6.0]), np.array([1.0, 2.0])]}
+        constants = profile_normalization_constants(profiles)
+        self.assertEqual(constants, {"GFP": 10.0, "Cy5": 6.0})
+        for channel in profiles:
+            normalized = [profile / constants[channel] for profile in profiles[channel]]
+            self.assertEqual(max(float(np.max(profile)) for profile in normalized), 1.0)
+
+    def test_tanh_fit_recovers_increasing_and_decreasing_slopes(self):
+        x = np.linspace(0.0, 10.0, 3000)
+        for left, right in ((0.1, 0.9), (0.9, 0.1)):
+            y = left + 0.5 * (right - left) * (1 + np.tanh((x - 4.0) / 1.2))
+            fit = fit_tanh_profile(x, y, max_points=512, pixel_size_mm=x[1] - x[0])
+            self.assertAlmostEqual(float(fit["midpoint_mm"]), 4.0, places=2)
+            self.assertAlmostEqual(float(fit["width_mm"]), 1.2, places=2)
+            self.assertAlmostEqual(
+                float(fit["signed_slope_per_mm"]), (right - left) / 2.4, places=2
+            )
+            self.assertAlmostEqual(
+                float(fit["absolute_slope_per_mm"]), abs((right - left) / 2.4), places=2
+            )
+
+    def test_tanh_fit_flags_flat_profile(self):
+        x = np.linspace(0.0, 5.0, 100)
+        fit = fit_tanh_profile(x, np.full_like(x, 0.4), max_points=100)
+        self.assertIn("low_amplitude", fit["qc_flags"])
+        self.assertFalse(fit["fit_valid"])
+
+    def test_tanh_optimizer_failure_returns_flagged_record(self):
+        x = np.linspace(0.0, 5.0, 100)
+        y = 0.2 + 0.6 * (1 + np.tanh((x - 2.5) / 0.8)) / 2
+        with patch("scipy.optimize.least_squares", side_effect=RuntimeError("synthetic failure")):
+            fit = fit_tanh_profile(x, y, max_points=100)
+        self.assertFalse(fit["optimizer_success"])
+        self.assertFalse(fit["fit_valid"])
+        self.assertIn("non_convergence", fit["qc_flags"])
+        self.assertIn("synthetic failure", fit["optimizer_message"])
 
 
 class ProcessingTests(unittest.TestCase):
@@ -172,37 +271,17 @@ class ProcessingTests(unittest.TestCase):
         self.assertEqual(local, (0, 15))
         self.assertEqual(global_range, (0, 1500))
 
-    def test_bridge_position_span_for_p04(self):
-        self.assertEqual(position_span(3, 2304), (6912, 9216))
-
     def test_physical_x_axes_start_p01_left_edge_at_zero(self):
         axes = physical_x_axes_mm([1000.0, 0.0], pixel_size_um=500.0, tile_width=2)
         np.testing.assert_allclose(axes[0], [0.0, 0.5])
         np.testing.assert_allclose(axes[1], [1.0, 1.5])
         self.assertGreater(axes[1][0] - axes[0][-1], 0.0)
 
-    def test_flatten_segments_and_mm_linear_fit(self):
-        axes = [np.array([0.0, 0.5]), np.array([2.0, 2.5])]
-        profiles = [10.0 + 3.0 * axes[0], 10.0 + 3.0 * axes[1]]
-        x, y = flatten_segments(axes, profiles, 0, 1)
-        fit = linear_fit_xy(x, y)
-        self.assertAlmostEqual(fit["slope"], 3.0)
-        self.assertAlmostEqual(fit["intercept"], 10.0)
-        self.assertAlmostEqual(fit["r_squared"], 1.0)
-
     def test_split_equal_width_recovers_tiles(self):
         image = np.arange(12, dtype=np.uint16).reshape(2, 6)
         tiles = split_equal_width(image, 3)
         self.assertEqual(len(tiles), 3)
         np.testing.assert_array_equal(tiles[1], image[:, 2:4])
-
-    def test_linear_fit_reports_known_slope(self):
-        profile = 4.0 * np.arange(10) + 7.0
-        fit = linear_fit(profile, pixel_size_um=0.5)
-        self.assertAlmostEqual(fit["slope_per_pixel"], 4.0)
-        self.assertAlmostEqual(fit["slope_per_um"], 8.0)
-        self.assertAlmostEqual(fit["intercept"], 7.0)
-        self.assertAlmostEqual(fit["r_squared"], 1.0)
 
     def test_streaming_histogram_produces_one_global_range(self):
         histogram = empty_uint16_histogram()
