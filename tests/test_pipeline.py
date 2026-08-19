@@ -20,8 +20,24 @@ class PipelineTests(unittest.TestCase):
     def test_legacy_slope_config_keys_are_ignored(self):
         path = Path.cwd() / ".test_outputs" / "legacy_slope_config.json"
         path.parent.mkdir(exist_ok=True)
-        path.write_text('{"slope_start_position": 1, "slope_end_position": 6}', encoding="utf-8")
+        path.write_text(
+            """{
+                "slope_start_position": 1,
+                "slope_end_position": 6,
+                "reference_positions": {"GFP": 1, "Cy5": 2},
+                "smoothing_window_px": 101,
+                "trendline_window_px": 201,
+                "correction_fit_degree": 2,
+                "bridge_position": 4,
+                "saturation_fraction_threshold": 0.001
+            }""",
+            encoding="utf-8",
+        )
         self.assertEqual(AnalysisConfig.from_json(path).correction_method, "overlap_quadratic")
+
+    def test_reference_correction_method_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "overlap_quadratic"):
+            AnalysisConfig(correction_method="reference_quadratic")
 
     def test_step1_timepoint_folder_is_zero_padded(self):
         self.assertEqual(_timepoint_folder(Path("step_01_stitched_images"), 18), Path("step_01_stitched_images") / "t018")

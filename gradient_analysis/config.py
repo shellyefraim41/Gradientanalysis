@@ -32,18 +32,10 @@ class AnalysisConfig:
             ChannelConfig("Cy5", ("cy5", "647"), "#d62a8b", (1.0, 0.0, 1.0)),
         )
     )
-    reference_positions: dict[str, int | None] = field(
-        default_factory=lambda: {"GFP": None, "Cy5": None}
-    )
-    smoothing_window_px: int = 101
-    trendline_window_px: int = 201
-    correction_fit_degree: int = 2
-    bridge_position: int = 4
     microscope_background: float = 100.0
     apply_illumination_correction: bool = True
     correction_method: str = "overlap_quadratic"
     overlap_min_signal: float = 5.0
-    saturation_fraction_threshold: float = 0.001
     preview_low_percentile: float = 1.0
     preview_high_percentile: float = 99.8
     save_corrected_tiles: bool = True
@@ -75,9 +67,20 @@ class AnalysisConfig:
             raw["timepoints"] = tuple(raw["timepoints"])
         if raw.get("all_z_timepoints") is not None:
             raw["all_z_timepoints"] = tuple(raw["all_z_timepoints"])
-        # Removed linear-slope settings are accepted but intentionally ignored.
-        raw.pop("slope_start_position", None)
-        raw.pop("slope_end_position", None)
+        # Removed settings are accepted but intentionally ignored so older
+        # configuration files remain loadable.
+        legacy_keys = (
+            "slope_start_position",
+            "slope_end_position",
+            "reference_positions",
+            "smoothing_window_px",
+            "trendline_window_px",
+            "correction_fit_degree",
+            "bridge_position",
+            "saturation_fraction_threshold",
+        )
+        for key in legacy_keys:
+            raw.pop(key, None)
         return cls(**raw)
 
     @property
@@ -85,9 +88,8 @@ class AnalysisConfig:
         return self.z_index - 1 if self.z_is_one_based else self.z_index
 
     def __post_init__(self) -> None:
-        allowed = {"reference_quadratic", "overlap_quadratic"}
-        if self.correction_method not in allowed:
-            raise ValueError(f"correction_method must be one of {sorted(allowed)}")
+        if self.correction_method != "overlap_quadratic":
+            raise ValueError("correction_method must be 'overlap_quadratic'")
         if self.overlap_min_signal < 0:
             raise ValueError("overlap_min_signal must be non-negative")
         if self.tanh_max_points < 4:
