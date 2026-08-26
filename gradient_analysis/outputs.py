@@ -442,6 +442,36 @@ def save_overlap_residual_plot(
     plt.close(fig)
 
 
+def save_z_correction_coefficients_plot(
+    path: Path,
+    rows: list[dict[str, object]],
+    channel: ChannelConfig,
+    title: str,
+) -> None:
+    """Compare independently fitted and quality-smoothed coefficients by Z."""
+    selected = sorted(
+        (row for row in rows if row.get("channel") == channel.label),
+        key=lambda row: int(row["z_index_one_based"]),
+    )
+    z = np.asarray([int(row["z_index_one_based"]) for row in selected])
+    fig, axes = plt.subplots(2, 1, figsize=(9, 7), sharex=True, constrained_layout=True)
+    for axis, raw_key, smooth_key, label in (
+        (axes[0], "raw_linear_coefficient", "smoothed_linear_coefficient", "Linear coefficient"),
+        (axes[1], "raw_quadratic_coefficient", "smoothed_quadratic_coefficient", "Quadratic coefficient"),
+    ):
+        raw = np.asarray([float(row[raw_key]) for row in selected])
+        smooth = np.asarray([float(row[smooth_key]) for row in selected])
+        axis.scatter(z, raw, color="gray", s=18, alpha=0.8, label="Independent per-Z fit")
+        axis.plot(z, smooth, color=channel.plot_color, linewidth=2, label="Quality-smoothed")
+        axis.set_ylabel(label)
+        axis.grid(alpha=0.2)
+        axis.legend()
+    axes[0].set_title(title)
+    axes[1].set_xlabel("Z plane (one-based)")
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+
+
 def save_continuous_profile_plot(
     path: Path,
     profiles: dict[str, tuple[np.ndarray, np.ndarray]],

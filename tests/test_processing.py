@@ -15,6 +15,7 @@ from gradient_analysis.processing import (
     fit_overlap_log_quadratic,
     fit_tanh_profile,
     feather_profiles,
+    feather_tiles_2d,
     fitted_illumination_profile,
     histogram_percentile_range,
     image_percentile_range,
@@ -23,11 +24,13 @@ from gradient_analysis.processing import (
     physical_x_axes_mm,
     profile_curvature,
     profile_normalization_constants,
+    quadratic_illumination_profile,
     reference_candidate_score,
     smoothed_illumination_image,
     smoothed_illumination_profile,
     subtract_background_floor,
     smooth_image,
+    smooth_z_coefficients,
     split_equal_width,
     stitch,
     to_uint16,
@@ -92,6 +95,37 @@ class FeatherAndTanhTests(unittest.TestCase):
         np.testing.assert_allclose(combined, x)
         self.assertEqual(details["overlap_widths_px"], [3, 2])
         self.assertEqual(x.size, 16)
+
+    def test_2d_feather_uses_stage_x_y_and_preserves_physical_image(self):
+        height, width = 5, 6
+        x_starts = [0.0, 4.0]
+        y_starts = [0.0, -1.0]
+        tiles = []
+        for x_start, y_start in zip(x_starts, y_starts):
+            local_y, local_x = np.indices((height, width), dtype=float)
+            tiles.append(100.0 + 3.0 * (local_x + x_start) + 7.0 * (local_y + y_start))
+        mosaic, details = feather_tiles_2d(tiles, x_starts, y_starts)
+        global_y, global_x = np.indices((4, 10), dtype=float)
+        expected = 100.0 + 3.0 * global_x + 7.0 * global_y
+        np.testing.assert_allclose(mosaic, expected, atol=1e-5)
+        self.assertEqual(details["overlap_widths_px"], [2])
+        self.assertEqual(details["common_y_height_px"], 4)
+        self.assertEqual(details["output_width_px"], 10)
+
+    def test_z_coefficient_smoothing_downweights_bad_plane(self):
+        expected = np.linspace(-0.2, 0.2, 9)
+        measured = expected.copy()
+        measured[4] = 2.0
+        weights = np.ones(9)
+        weights[4] = 0.01
+        smoothed, normalized_weights = smooth_z_coefficients(measured, weights, penalty=10.0)
+        self.assertLess(abs(smoothed[4] - expected[4]), abs(measured[4] - expected[4]))
+        self.assertLess(normalized_weights[4], normalized_weights[3])
+
+    def test_quadratic_profile_is_positive_and_median_normalized(self):
+        profile = quadratic_illumination_profile(101, -0.12, -0.25)
+        self.assertTrue(np.all(profile > 0))
+        self.assertAlmostEqual(float(np.median(profile)), 1.0, places=12)
 
     def test_channel_normalization_uses_one_global_profile_maximum(self):
         profiles = {"GFP": [np.array([1.0, 5.0]), np.array([2.0, 10.0])],

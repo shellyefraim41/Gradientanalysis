@@ -110,6 +110,129 @@ def feather_profiles(
     }
 
 
+def feather_tiles_2d(
+    tiles: list[np.ndarray],
+    x_starts_px: list[float],
+    y_starts_px: list[float],
+) -> tuple[np.ndarray, dict[str, object]]:
+    """Stage-align and cosine-feather 2-D tiles into one rectangular mosaic.
+
+    The output uses the physical-Y intersection shared by every tile. This
+    avoids zero padding and ensures that the mosaic X profile averages the same
+    physical Y band at every position.
+    """
+    if not tiles or not (len(tiles) == len(x_starts_px) == len(y_starts_px)):
+        raise ValueError("Tiles and stage starts must be non-empty and equal length.")
+    shapes = {tile.shape for tile in tiles}
+    if len(shapes) != 1 or tiles[0].ndim != 2:
+        raise ValueError("Every mosaic tile must be an equally sized 2-D array.")
+    height, width = tiles[0].shape
+    x_fractional = np.asarray(x_starts_px, dtype=np.float64)
+    y_fractional = np.asarray(y_starts_px, dtype=np.float64)
+    if not np.all(np.isfinite(x_fractional)) or not np.all(np.isfinite(y_fractional)):
+        raise ValueError("Stage starts must be finite.")
+    x_rounded = np.rint(x_fractional).astype(int)
+    y_rounded = np.rint(y_fractional).astype(int)
+    x_rounded -= int(np.min(x_rounded))
+    common_y_start = int(np.max(y_rounded))
+    common_y_stop = int(np.min(y_rounded + height))
+    if common_y_stop <= common_y_start:
+        raise ValueError("Stage Y offsets leave no common physical-Y band.")
+    output_width = int(np.max(x_rounded + width))
+    weighted = np.zeros((common_y_stop - common_y_start, output_width), dtype=np.float32)
+    weights = np.zeros(output_width, dtype=np.float32)
+    overlaps: list[int] = []
+    local_weights: list[np.ndarray] = []
+    for index in range(len(tiles)):
+        local_weight = np.ones(width, dtype=np.float32)
+        if index:
+            overlap = int(x_rounded[index - 1] + width - x_rounded[index])
+            if overlap < 0:
+                raise ValueError("Stage X offsets contain a gap between tiles.")
+            if overlap >= width:
+                raise ValueError("Stage X offsets do not advance by a tile overlap.")
+            phase = np.linspace(0.0, np.pi, overlap, dtype=np.float32)
+            if overlap:
+                local_weight[:overlap] *= 0.5 * (1.0 - np.cos(phase))
+        if index + 1 < len(tiles):
+            overlap = int(x_rounded[index] + width - x_rounded[index + 1])
+            overlaps.append(overlap)
+            if overlap < 0:
+                raise ValueError("Stage X offsets contain a gap between tiles.")
+            if overlap >= width:
+                raise ValueError("Stage X offsets do not advance by a tile overlap.")
+            phase = np.linspace(0.0, np.pi, overlap, dtype=np.float32)
+            if overlap:
+                local_weight[-overlap:] *= 0.5 * (1.0 + np.cos(phase))
+        local_weights.append(local_weight)
+    for tile, x_start, y_start, local_weight in zip(
+        tiles, x_rounded, y_rounded, local_weights
+    ):
+        local_y_start = common_y_start - int(y_start)
+        local_y_stop = common_y_stop - int(y_start)
+        cropped = tile[local_y_start:local_y_stop].astype(np.float32, copy=False)
+        target = slice(int(x_start), int(x_start) + width)
+        weighted[:, target] += cropped * local_weight[np.newaxis, :]
+        weights[target] += local_weight
+    if np.any(weights <= 0):
+        raise ValueError("2-D feathering produced uncovered X coordinates.")
+    mosaic = weighted / weights[np.newaxis, :]
+    return mosaic, {
+        "method": "stage_aligned_2d_cosine_feather",
+        "x_starts_px_fractional": x_fractional.tolist(),
+        "x_starts_px_rounded": x_rounded.tolist(),
+        "y_starts_px_fractional": y_fractional.tolist(),
+        "y_starts_px_rounded": y_rounded.tolist(),
+        "overlap_widths_px": overlaps,
+        "common_y_start_px": common_y_start,
+        "common_y_stop_px": common_y_stop,
+        "common_y_height_px": common_y_stop - common_y_start,
+        "output_width_px": output_width,
+        "maximum_x_rounding_error_px": float(np.max(np.abs(x_fractional - np.rint(x_fractional)))),
+        "maximum_y_rounding_error_px": float(np.max(np.abs(y_fractional - np.rint(y_fractional)))),
+    }
+
+
+def quadratic_illumination_profile(
+    tile_width: int, linear_coefficient: float, quadratic_coefficient: float
+) -> np.ndarray:
+    """Build a positive median-one camera-X illumination profile."""
+    if tile_width <= 0:
+        raise ValueError("tile_width must be positive.")
+    center = (tile_width - 1) / 2.0
+    scale = max(center, 1.0)
+    local_x = (np.arange(tile_width, dtype=np.float64) - center) / scale
+    log_profile = linear_coefficient * local_x + quadratic_coefficient * local_x**2
+    log_profile -= float(np.median(log_profile))
+    return np.exp(log_profile)
+
+
+def smooth_z_coefficients(
+    values: np.ndarray, quality_weights: np.ndarray, penalty: float
+) -> tuple[np.ndarray, np.ndarray]:
+    """Quality-weight a Z series and penalize changes in its second derivative."""
+    values = np.asarray(values, dtype=np.float64)
+    quality_weights = np.asarray(quality_weights, dtype=np.float64)
+    if values.ndim != 1 or quality_weights.shape != values.shape:
+        raise ValueError("Coefficient values and weights must be equal 1-D arrays.")
+    if values.size < 2:
+        raise ValueError("At least two Z planes are required for smoothing.")
+    if penalty < 0:
+        raise ValueError("Smoothing penalty must be non-negative.")
+    valid = np.isfinite(values) & np.isfinite(quality_weights) & (quality_weights > 0)
+    if np.count_nonzero(valid) < 2:
+        raise ValueError("At least two valid Z coefficients are required.")
+    weights = np.zeros_like(values)
+    median_weight = float(np.median(quality_weights[valid]))
+    weights[valid] = np.clip(quality_weights[valid] / median_weight, 0.02, 50.0)
+    filled = np.interp(np.arange(values.size), np.flatnonzero(valid), values[valid])
+    second_difference = np.diff(np.eye(values.size), n=2, axis=0)
+    system = np.diag(weights) + float(penalty) * (second_difference.T @ second_difference)
+    system += np.eye(values.size) * np.finfo(np.float64).eps
+    smoothed = np.linalg.solve(system, weights * filled)
+    return smoothed, weights
+
+
 def profile_normalization_constants(
     profiles_by_channel: dict[str, list[np.ndarray]],
 ) -> dict[str, float]:

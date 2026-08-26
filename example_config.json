@@ -31,5 +31,8 @@
   "tanh_fit_enabled": true,
   "tanh_max_points": 1024,
   "all_z_enabled": true,
-  "all_z_timepoints": [2, 10, 14, 24, 36]
+  "all_z_timepoints": [2, 10, 14, 24, 36],
+  "all_z_coefficient_smoothing_penalty": 10.0,
+  "all_z_display_sample_stride": 32,
+  "all_z_save_mosaic_tiffs": true
 }

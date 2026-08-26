@@ -16,8 +16,8 @@ Adjacent fields overlap by about 21.6% (approximately 498 columns). Matching
 pixels from all adjacent overlaps, including the measured Y displacement, are
 used to robustly estimate one positive quadratic camera-X illumination profile
 for GFP and one for Cy5. Dark and detector-clipped pixels are excluded. Each
-illumination profile is normalized to median 1 and reused unchanged for every
-timepoint.
+Z15 illumination profile is normalized to median 1 and reused unchanged for
+every timepoint in Steps 3-7.
 
 After Y averaging, duplicate physical locations are combined with complementary
 cosine weights. A tile receives more weight farther from its camera edge; the
@@ -33,12 +33,21 @@ The output steps are:
 5. Corrected, normalized GFP/Cy5 profile for each timepoint.
 6. Robust hyperbolic-tangent fits and gradient summaries.
 7. The existing background-subtracted P02/P05 maximum-difference analysis.
-8. The same corrected, feathered, normalized analysis across every Z plane for
-   `t002`, `t010`, `t014`, `t024`, and `t036`. Step 8 also saves corrected
-   display-only stitched PNGs under `stitched_images/tXXX/`: one GFP image, one
-   Cy5 image, and one GFP/Cy5 merge for each Z plane. These PNGs use local
-   percentile scaling and are not measurement data; duplicate all-Z TIFF stacks
-   are not written.
+8. Corrected, feathered, normalized analysis across every Z plane for `t002`,
+   `t010`, `t014`, `t024`, and `t036`. Step 8 independently estimates one
+   overlap-derived quadratic profile per channel and Z. The raw linear and
+   quadratic coefficients are quality-weighted and smoothed across Z before a
+   median-one correction curve is reconstructed for each plane. Dim or noisy
+   planes therefore borrow strength from neighboring Z planes without forcing
+   their overall intensity to match.
+
+Step 8 also creates true stage-coordinate mosaics. Corrected tiles are aligned
+with both stage X and stage Y, cropped to their shared physical-Y band, and
+cosine-feathered in their 2-D overlaps. The quantitative X profile is averaged
+from this same mosaic. Each timepoint folder contains uint16 corrected mosaic
+TIFFs, GFP/Cy5 previews, and a merged preview for every Z. PNGs use one shared
+channel-specific display range across all selected timepoints and Z planes;
+TIFFs retain measurement intensities.
 
 For Steps 4-6, one maximum is calculated from all corrected, feathered Z15
 profiles for each channel. Every GFP profile is divided by the GFP maximum and
@@ -60,8 +69,10 @@ are accepted and ignored so older configuration files still load.
 TIFF files contain measurement values. Files ending in `_preview.png` are
 8-bit display copies. Local previews make each timepoint easy to inspect;
 `_global_preview.png` files use one shared channel-specific range for fair visual
-comparison. Display limits and all analysis settings are recorded in
-`run_metadata.json`.
+comparison. Step 8 mosaic previews always use a shared range across its complete
+selected T-by-Z collection. Display limits, raw and smoothed per-Z coefficients,
+overlap residuals, mosaic geometry, and all analysis settings are recorded in
+the Step 8 diagnostics and `run_metadata.json`.
 
 ## Installation and use
 

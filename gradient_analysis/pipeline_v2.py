@@ -13,13 +13,15 @@ from .outputs import (
     save_fit_heatmap, save_fit_metric_by_z_plot, save_fit_metric_timecourse_plot,
     save_max_difference_timecourse_plot, save_overlap_correction_plot,
     save_overlap_residual_plot, save_preview, save_rgb, save_tanh_fit_plot,
+    save_z_correction_coefficients_plot,
     save_tiff, write_json, write_rows_csv,
 )
 from .processing import (
-    correct_tile, empty_uint16_histogram, feather_profiles,
+    correct_tile, empty_uint16_histogram, feather_profiles, feather_tiles_2d,
     fit_overlap_log_quadratic, fit_tanh_profile, histogram_percentile_range,
     image_percentile_range, merge_rgb, overlap_log_ratio_samples,
-    physical_x_axes_mm, profile_normalization_constants, split_equal_width,
+    physical_x_axes_mm, profile_normalization_constants, quadratic_illumination_profile,
+    smooth_z_coefficients, split_equal_width,
     stitch, subtract_background_floor, to_uint16, update_uint16_histogram, x_profile,
 )
 
@@ -81,7 +83,7 @@ def _save_previews(timepoints, channels, raw_paths, corrected_paths, raw_hist, c
             "local_ranges_by_image": local}
 
 
-def _run_all_z(source, config, x_axes, corrections, step8, base):
+def _run_all_z(source, config, x_axes, step8, base):
     selected = tuple(config.all_z_timepoints)
     invalid = [t for t in selected if t not in source.timepoints]
     if invalid:
@@ -90,51 +92,214 @@ def _run_all_z(source, config, x_axes, corrections, step8, base):
     profiles = {c.label: {} for c in config.channels}
     stitched_root = step8 / "stitched_images"
     stitched_root.mkdir(parents=True, exist_ok=True)
+    correction_root = step8 / "per_z_correction_diagnostics"
+    correction_root.mkdir(parents=True, exist_ok=True)
     display_rows: list[dict[str, object]] = []
-    feather_details = None
+    correction_rows: list[dict[str, object]] = []
+    overlap_rows: list[dict[str, object]] = []
+    samples = {
+        c.label: {z: [] for z in range(z_count)} for c in config.channels
+    }
+    sampled_tiles = {c.label: [] for c in config.channels}
+    tile_width = int(source.sizes["X"])
+    pixel_size_um = float(source.pixel_size_um)
+    saturation_signal = float(np.iinfo(np.uint16).max) - config.microscope_background
+    stride = int(config.all_z_display_sample_stride)
+    pair_geometry = []
+    for left, right in zip(source.positions, source.positions[1:]):
+        pair_geometry.append((
+            left,
+            right,
+            int(round(abs(right.x_um - left.x_um) / pixel_size_um)),
+            int(round((right.y_um - left.y_um) / pixel_size_um)),
+        ))
+
+    # First pass: estimate one raw overlap model per Z and retain sparse pixels
+    # for a shared display range. No complete corrected stack is held in RAM.
+    for t in selected:
+        for z in range(z_count):
+            for c in config.channels:
+                tiles = [
+                    subtract_background_floor(
+                        source.plane(t, p.index, c, z), config.microscope_background
+                    )
+                    for p in source.positions
+                ]
+                for tile in tiles:
+                    sampled_tiles[c.label].append((z, to_uint16(tile[::stride, ::stride])[0]))
+                for index, (left, right, x_offset, y_shift) in enumerate(pair_geometry):
+                    xl, xr, ratios, details = overlap_log_ratio_samples(
+                        tiles[index], tiles[index + 1], x_offset, y_shift,
+                        config.overlap_min_signal, saturation_signal,
+                    )
+                    row = {
+                        "timepoint": t, "z_index_zero_based": z,
+                        "z_index_one_based": z + 1, "channel": c.label,
+                        "position_pair": f"{left.name}-{right.name}",
+                        "raw_per_z_corrected_median_abs_log_residual": float("nan"),
+                        "smoothed_corrected_median_abs_log_residual": float("nan"),
+                        **details,
+                    }
+                    overlap_rows.append(row)
+                    if ratios.size:
+                        samples[c.label][z].append((xl, xr, ratios, row))
+
+    corrections = {c.label: {} for c in config.channels}
+    models = {c.label: {} for c in config.channels}
+    for c in config.channels:
+        raw_linear = np.full(z_count, np.nan, dtype=np.float64)
+        raw_quadratic = np.full(z_count, np.nan, dtype=np.float64)
+        counts = np.zeros(z_count, dtype=np.float64)
+        residuals = np.full(z_count, np.nan, dtype=np.float64)
+        for z in range(z_count):
+            z_samples = samples[c.label][z]
+            if not z_samples:
+                continue
+            xl = np.concatenate([item[0] for item in z_samples])
+            xr = np.concatenate([item[1] for item in z_samples])
+            ratios = np.concatenate([item[2] for item in z_samples])
+            try:
+                _, model = fit_overlap_log_quadratic(tile_width, xl, xr, ratios)
+            except (ValueError, np.linalg.LinAlgError):
+                continue
+            raw_linear[z] = float(model["linear_coefficient"])
+            raw_quadratic[z] = float(model["quadratic_coefficient"])
+            counts[z] = float(model["sample_count"])
+            residuals[z] = float(model["median_abs_log_residual"])
+            raw_profile = quadratic_illumination_profile(
+                tile_width, raw_linear[z], raw_quadratic[z]
+            )
+            for sx, sy, sr, row in z_samples:
+                predicted = np.log(
+                    raw_profile[sx.astype(int)] / raw_profile[sy.astype(int)]
+                )
+                row["raw_per_z_corrected_median_abs_log_residual"] = float(
+                    np.median(np.abs(sr - predicted))
+                )
+        valid = np.isfinite(raw_linear) & np.isfinite(raw_quadratic) & (counts > 0)
+        if np.count_nonzero(valid) < 2:
+            raise ValueError(f"Fewer than two valid all-Z overlap models for {c.label}.")
+        count_scale = max(float(np.median(counts[valid])), 1.0)
+        residual_scale = max(float(np.median(residuals[valid])), 1e-6)
+        quality = np.zeros(z_count, dtype=np.float64)
+        quality[valid] = (counts[valid] / count_scale) / np.maximum(
+            residuals[valid] / residual_scale, 0.25
+        ) ** 2
+        smooth_linear, normalized_weights = smooth_z_coefficients(
+            raw_linear, quality, config.all_z_coefficient_smoothing_penalty
+        )
+        smooth_quadratic, _ = smooth_z_coefficients(
+            raw_quadratic, quality, config.all_z_coefficient_smoothing_penalty
+        )
+        for z in range(z_count):
+            profile = quadratic_illumination_profile(
+                tile_width, float(smooth_linear[z]), float(smooth_quadratic[z])
+            )
+            corrections[c.label][z] = 1.0 / profile
+            model = {
+                "model": "exp(linear*x + quadratic*x^2)",
+                "z_index_zero_based": z,
+                "z_index_one_based": z + 1,
+                "raw_linear_coefficient": float(raw_linear[z]),
+                "raw_quadratic_coefficient": float(raw_quadratic[z]),
+                "smoothed_linear_coefficient": float(smooth_linear[z]),
+                "smoothed_quadratic_coefficient": float(smooth_quadratic[z]),
+                "quality_weight": float(normalized_weights[z]),
+                "sample_count": int(counts[z]),
+                "raw_median_abs_log_residual": float(residuals[z]),
+                "profile_median": float(np.median(profile)),
+                "profile_min": float(np.min(profile)),
+                "profile_max": float(np.max(profile)),
+            }
+            models[c.label][z] = model
+            correction_rows.append({"channel": c.label, **model})
+            channel_dir = correction_root / c.label
+            save_overlap_correction_plot(
+                channel_dir / f"{base}_z{z + 1:02d}_{c.label}_smoothed_overlap_profile.png",
+                profile, c,
+                f"{source.path.name} - {c.label}, Z={z + 1} smoothed overlap illumination",
+            )
+            for sx, sy, sr, row in samples[c.label][z]:
+                predicted = np.log(profile[sx.astype(int)] / profile[sy.astype(int)])
+                row["smoothed_corrected_median_abs_log_residual"] = float(
+                    np.median(np.abs(sr - predicted))
+                )
+        save_z_correction_coefficients_plot(
+            correction_root / f"{base}_{c.label}_raw-vs-smoothed_coefficients.png",
+            correction_rows, c,
+            f"{source.path.name} - {c.label} overlap coefficients across Z",
+        )
+    write_rows_csv(correction_root / "per_z_quadratic_coefficients.csv", correction_rows)
+    write_json(correction_root / "per_z_quadratic_models.json", models)
+    write_rows_csv(correction_root / "per_z_overlap_residuals.csv", overlap_rows)
+    write_json(correction_root / "per_z_overlap_residuals.json", overlap_rows)
+
+    # A stratified sparse sample establishes one comparable display range for
+    # every Z and timepoint without storing a second complete image collection.
+    display_histograms = {c.label: empty_uint16_histogram() for c in config.channels}
+    sampled_x = np.arange(0, tile_width, stride)
+    for c in config.channels:
+        for z, tile in sampled_tiles[c.label]:
+            corrected_sample = tile.astype(np.float32) * corrections[c.label][z][sampled_x][np.newaxis, :]
+            update_uint16_histogram(display_histograms[c.label], to_uint16(corrected_sample)[0])
+    display_ranges = {
+        c.label: histogram_percentile_range(
+            display_histograms[c.label], config.preview_low_percentile,
+            config.preview_high_percentile,
+        )
+        for c in config.channels
+    }
+    del sampled_tiles
+
+    pixel_mm = pixel_size_um / 1000.0
+    x_origin = min(float(axis[0]) for axis in x_axes)
+    x_starts_px = [(float(axis[0]) - x_origin) / pixel_mm for axis in x_axes]
+    first_y = float(source.positions[0].y_um)
+    y_starts_px = [(float(p.y_um) - first_y) / pixel_size_um for p in source.positions]
+    mosaic_details = None
+    clipped_total = 0
     for t in selected:
         timepoint_dir = _timepoint_folder(stitched_root, t)
         timepoint_dir.mkdir(parents=True, exist_ok=True)
         for z in range(z_count):
-            stitched_images: list[np.ndarray] = []
-            display_ranges: list[tuple[int, int]] = []
+            display_images: list[np.ndarray] = []
             for c in config.channels:
-                local = []
-                corrected_tiles: list[np.ndarray] = []
+                corrected_tiles = []
                 for p in source.positions:
-                    signal = subtract_background_floor(source.plane(t, p.index, c, z), config.microscope_background)
-                    corrected = correct_tile(signal, corrections[c.label])
-                    corrected_tiles.append(corrected)
-                    local.append(x_profile(corrected))
-                x, y, feather_details = feather_profiles(x_axes, local)
-                profiles[c.label][(t, z)] = (x, y)
-                converted = [to_uint16(tile)[0] for tile in corrected_tiles]
-                contact_sheet = stitch(converted)
-                limits = image_percentile_range(
-                    contact_sheet,
-                    config.preview_low_percentile,
-                    config.preview_high_percentile,
+                    signal = subtract_background_floor(
+                        source.plane(t, p.index, c, z), config.microscope_background
+                    )
+                    corrected_tiles.append(correct_tile(signal, corrections[c.label][z]))
+                mosaic, mosaic_details = feather_tiles_2d(
+                    corrected_tiles, x_starts_px, y_starts_px
                 )
-                stitched_images.append(contact_sheet)
-                display_ranges.append(limits)
+                x = np.arange(mosaic.shape[1], dtype=np.float64) * pixel_mm
+                profiles[c.label][(t, z)] = (x, x_profile(mosaic))
+                converted, clipped = to_uint16(mosaic)
+                clipped_total += clipped
+                stem = f"{base}_t{t:03d}_z{z + 1:02d}_{c.label}_corrected_feathered_mosaic"
+                tiff_path = timepoint_dir / f"{stem}.tif"
+                if config.all_z_save_mosaic_tiffs:
+                    save_tiff(tiff_path, converted)
+                low, high = display_ranges[c.label]
                 save_color_preview(
-                    timepoint_dir / f"{base}_t{t:03d}_z{z + 1:02d}_{c.label}_positions_left-to-right_preview.png",
-                    contact_sheet,
-                    *limits,
-                    c.rgb,
+                    timepoint_dir / f"{stem}_preview.png", converted, low, high, c.rgb
                 )
+                display_images.append(converted)
                 display_rows.append({
-                    "timepoint": t,
-                    "z_index_zero_based": z,
-                    "z_index_one_based": z + 1,
-                    "channel": c.label,
-                    "display_low": limits[0],
-                    "display_high": limits[1],
-                    "scaling": "local percentile display only",
+                    "timepoint": t, "z_index_zero_based": z,
+                    "z_index_one_based": z + 1, "channel": c.label,
+                    "display_low": low, "display_high": high,
+                    "clipped_pixel_count": clipped,
+                    "scaling": "shared channel range across selected T and Z",
+                    "mosaic_tiff": str(tiff_path) if config.all_z_save_mosaic_tiffs else "not saved",
                 })
             save_rgb(
-                timepoint_dir / f"{base}_t{t:03d}_z{z + 1:02d}_GFP-Cy5_merge.png",
-                merge_rgb(stitched_images, [c.rgb for c in config.channels], display_ranges),
+                timepoint_dir / f"{base}_t{t:03d}_z{z + 1:02d}_GFP-Cy5_corrected_feathered_mosaic.png",
+                merge_rgb(
+                    display_images, [c.rgb for c in config.channels],
+                    [display_ranges[c.label] for c in config.channels],
+                ),
             )
     write_rows_csv(stitched_root / "stitched_image_display_ranges.csv", display_rows)
     write_json(stitched_root / "stitched_image_display_ranges.json", display_rows)
@@ -171,13 +336,21 @@ def _run_all_z(source, config, x_axes, corrections, step8, base):
                              f"{source.path.name} - {c.label} {suffix.replace('_', ' ')}")
     return {"selected_timepoints": list(selected), "z_count": z_count, "record_count": len(records),
             "normalization_constants": constants,
-            "correction_source": f"fixed overlap correction from Z={config.z_index}",
-            "feathering": feather_details,
+            "correction_source": "one overlap model per Z, coefficients quality-weighted and smoothed across Z",
+            "correction_timepoints": list(selected),
+            "coefficient_smoothing_penalty": config.all_z_coefficient_smoothing_penalty,
+            "per_z_models": models,
+            "mosaic_geometry": mosaic_details,
             "stitched_images": {
                 "count": len(selected) * z_count * 3,
                 "channels": [c.label for c in config.channels],
                 "merge": "GFP-Cy5",
-                "scaling": "local percentile display only; PNGs are not measurement data",
+                "method": "stage-aligned 2-D cosine-feathered mosaic",
+                "scaling": "one sampled global percentile range per channel across selected T and Z",
+                "display_ranges": {key: list(value) for key, value in display_ranges.items()},
+                "display_sample_stride": stride,
+                "mosaic_tiffs_saved": config.all_z_save_mosaic_tiffs,
+                "clipped_pixel_count": clipped_total,
             }}
 
 
@@ -292,7 +465,7 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
                                             max_records, config.channels, f"{source_path.name} - P02/P05 max differences")
         write_rows_csv(dirs[7] / f"{base}_z{config.z_index:02d}_P02-P05_max_differences.csv", max_records)
         write_json(dirs[7] / f"{base}_z{config.z_index:02d}_P02-P05_max_differences.json", max_records)
-        all_z = _run_all_z(source, config, x_axes, corrections, dirs[8], base) if config.all_z_enabled else None
+        all_z = _run_all_z(source, config, x_axes, dirs[8], base) if config.all_z_enabled else None
         display = _save_previews(timepoints, config.channels, raw_paths, corrected_paths, raw_hist, corrected_hist, config, dirs[1], base)
         overlap_widths = list(feather_details["overlap_widths_px"]) if feather_details else []
         measured_overlap = (
@@ -304,7 +477,7 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
                     "microscope_background": config.microscope_background, "correction_method": "overlap_quadratic",
                     "measured_overlap_percent": measured_overlap,
                     "measured_overlap_widths_px": overlap_widths,
-                    "correction_policy": "one fixed profile per channel estimated at the requested Z and reused across time and all-Z analysis",
+                    "correction_policy": "Z15 uses one fixed profile per channel across time; Step 8 estimates one profile per Z and quality-smooths its coefficients across Z",
                     "overlap_models": models, "profile_feathering": feather_details,
                     "profile_normalization_constants": constants,
                     "profile_normalization_scope": "one maximum per channel across selected Z15 feathered profiles",
@@ -314,8 +487,11 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
                                           "normalize_profiles": config.normalize_profiles,
                                           "tanh_fit_enabled": config.tanh_fit_enabled,
                                           "tanh_max_points": config.tanh_max_points,
-                                          "all_z_enabled": config.all_z_enabled,
-                                          "all_z_timepoints": list(config.all_z_timepoints)},
+                                           "all_z_enabled": config.all_z_enabled,
+                                           "all_z_timepoints": list(config.all_z_timepoints),
+                                           "all_z_coefficient_smoothing_penalty": config.all_z_coefficient_smoothing_penalty,
+                                           "all_z_display_sample_stride": config.all_z_display_sample_stride,
+                                           "all_z_save_mosaic_tiffs": config.all_z_save_mosaic_tiffs},
                     "legacy_linear_slopes_removed": True, "all_z_analysis": all_z, "display_scaling": display}
     write_json(run_dir / "run_metadata.json", metadata)
     return run_dir

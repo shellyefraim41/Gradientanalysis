@@ -45,6 +45,9 @@ class AnalysisConfig:
     tanh_max_points: int = 1024
     all_z_enabled: bool = True
     all_z_timepoints: tuple[int, ...] = (2, 10, 14, 24, 36)
+    all_z_coefficient_smoothing_penalty: float = 10.0
+    all_z_display_sample_stride: int = 32
+    all_z_save_mosaic_tiffs: bool = True
 
     @classmethod
     def from_json(cls, path: str | Path | None) -> "AnalysisConfig":
@@ -96,3 +99,7 @@ class AnalysisConfig:
             raise ValueError("tanh_max_points must be at least 4")
         if any(timepoint < 0 for timepoint in self.all_z_timepoints):
             raise ValueError("all_z_timepoints must be non-negative")
+        if self.all_z_coefficient_smoothing_penalty < 0:
+            raise ValueError("all_z_coefficient_smoothing_penalty must be non-negative")
+        if self.all_z_display_sample_stride < 1:
+            raise ValueError("all_z_display_sample_stride must be at least 1")

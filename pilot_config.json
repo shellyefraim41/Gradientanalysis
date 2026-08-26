@@ -12,5 +12,8 @@
   "feather_overlaps": true,
   "normalize_profiles": true,
   "tanh_fit_enabled": true,
-  "all_z_enabled": false
+  "all_z_enabled": false,
+  "all_z_coefficient_smoothing_penalty": 10.0,
+  "all_z_display_sample_stride": 32,
+  "all_z_save_mosaic_tiffs": true
 }

@@ -197,10 +197,18 @@ def create_step8_presentation(run_dir: Path) -> Path:
     for timepoint_dir in timepoint_dirs:
         timepoint = int(timepoint_dir.name[1:])
         _section_slide(presentation, _time_label(timepoint), "Step 08 stitched images")
+        merge = list(timepoint_dir.glob("*_GFP-Cy5_corrected_feathered_mosaic.png"))
+        gfp = list(timepoint_dir.glob("*_GFP_corrected_feathered_mosaic_preview.png"))
+        cy5 = list(timepoint_dir.glob("*_Cy5_corrected_feathered_mosaic_preview.png"))
+        # Keep presentations reproducible for older contact-sheet runs.
+        if not merge:
+            merge = list(timepoint_dir.glob("*_GFP-Cy5_merge.png"))
+            gfp = list(timepoint_dir.glob("*_GFP_positions_left-to-right_preview.png"))
+            cy5 = list(timepoint_dir.glob("*_Cy5_positions_left-to-right_preview.png"))
         groups = (
-            ("GFP–Cy5 merge", list(timepoint_dir.glob("*_GFP-Cy5_merge.png")), DARK),
-            ("GFP", list(timepoint_dir.glob("*_GFP_positions_left-to-right_preview.png")), GREEN),
-            ("Cy5", list(timepoint_dir.glob("*_Cy5_positions_left-to-right_preview.png")), MAGENTA),
+            ("GFP–Cy5 merge", merge, DARK),
+            ("GFP", gfp, GREEN),
+            ("Cy5", cy5, MAGENTA),
         )
         for label, paths, color in groups:
             if len(paths) != 26:
