@@ -119,8 +119,11 @@ def finalize(
 
     metadata = deepcopy(reference)
     metadata["correction_policy"] = (
-        "Z15 uses one fixed profile per channel across time; Step 8 estimates one "
-        "profile per Z and quality-smooths its coefficients across Z"
+        f"Z{config.z_index} uses one fixed profile per channel across time; Step 8 "
+        "estimates one profile per Z and quality-smooths its coefficients across Z"
+    )
+    metadata["profile_normalization_scope"] = (
+        f"one maximum per channel across selected Z{config.z_index} feathered profiles"
     )
     metadata["analysis_controls"].update(
         all_z_coefficient_smoothing_penalty=config.all_z_coefficient_smoothing_penalty,

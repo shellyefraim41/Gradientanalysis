@@ -11,6 +11,7 @@ from gradient_analysis.outputs import (
     save_color_preview,
     save_max_difference_timecourse_plot,
     save_normalization_plot,
+    save_slope_timecourse_table,
     save_tiff,
     save_timecourse_plot,
     write_rows_csv,
@@ -113,6 +114,36 @@ class OutputTests(unittest.TestCase):
         )
         with Image.open(path) as image:
             self.assertGreater(image.size[0], 0)
+
+    def test_slope_tables_separate_signed_and_absolute_values(self):
+        folder = Path.cwd() / ".test_outputs"
+        folder.mkdir(exist_ok=True)
+        channels = (
+            ChannelConfig("GFP", ("gfp",), "#20a83e", (0, 1, 0)),
+            ChannelConfig("Cy5", ("cy5",), "#d62a8b", (1, 0, 1)),
+        )
+        records = [
+            {
+                "timepoint": timepoint,
+                "channel": channel.label,
+                "signed_slope_per_mm": sign * (timepoint + 0.5),
+                "absolute_slope_per_mm": timepoint + 0.5,
+            }
+            for timepoint in (0, 1)
+            for channel, sign in zip(channels, (-1, 1))
+        ]
+        for metric in ("signed_slope_per_mm", "absolute_slope_per_mm"):
+            path = folder / f"{metric}.png"
+            save_slope_timecourse_table(
+                path,
+                records,
+                channels,
+                metric,
+                "Slope table test",
+                time_scale=2.0,
+            )
+            with Image.open(path) as image:
+                self.assertGreater(image.size[0], 0)
 
 
 if __name__ == "__main__":

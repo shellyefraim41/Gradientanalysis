@@ -6,9 +6,11 @@ time rather than loading the complete acquisition into RAM.
 
 ## Analysis
 
-The experiment configuration treats `Z=15` as one-based (ND2 index 14), sorts
-stage positions left-to-right from their metadata, and processes all 37
-timepoints. Every tile is processed in this order:
+The full experiment configuration treats `Z=15` as one-based (ND2 index 14),
+while `exp106_2026_07_30_z11_config.json` runs the primary time-course analysis
+at one-based `Z=11` (ND2 index 10). Both sort stage positions left-to-right from
+their metadata and process all 37 timepoints. Every tile is processed in this
+order:
 
 `raw - 100, floored at 0 -> overlap-derived X correction -> average over Y`
 
@@ -16,8 +18,8 @@ Adjacent fields overlap by about 21.6% (approximately 498 columns). Matching
 pixels from all adjacent overlaps, including the measured Y displacement, are
 used to robustly estimate one positive quadratic camera-X illumination profile
 for GFP and one for Cy5. Dark and detector-clipped pixels are excluded. Each
-Z15 illumination profile is normalized to median 1 and reused unchanged for
-every timepoint in Steps 3-7.
+single-Z illumination profile is normalized to median 1 and reused unchanged
+for every timepoint in that run.
 
 After Y averaging, duplicate physical locations are combined with complementary
 cosine weights. A tile receives more weight farther from its camera edge; the
@@ -40,6 +42,9 @@ The output steps are:
    median-one correction curve is reconstructed for each plane. Dim or noisy
    planes therefore borrow strength from neighboring Z planes without forcing
    their overall intensity to match.
+9. Signed GFP and Cy5 tanh-slope timecourses, a combined absolute-slope
+   timecourse, machine-readable slope tables, and separate signed/absolute
+   table images. Experimental time is the zero-based ND2 index multiplied by 2.
 
 Step 8 also creates true stage-coordinate mosaics. Corrected tiles are aligned
 with both stage X and stage Y, cropped to their shared physical-Y band, and
@@ -49,11 +54,12 @@ TIFFs, GFP/Cy5 previews, and a merged preview for every Z. PNGs use one shared
 channel-specific display range across all selected timepoints and Z planes;
 TIFFs retain measurement intensities.
 
-For Steps 4-6, one maximum is calculated from all corrected, feathered Z15
-profiles for each channel. Every GFP profile is divided by the GFP maximum and
-every Cy5 profile by the Cy5 maximum. Corrected TIFFs remain in intensity units;
-normalization applies only to analytical profiles and fits. Step 8 calculates
-its own two normalization constants across its selected T-by-Z collection.
+For Steps 4-6 and 9, one maximum is calculated from all corrected, feathered
+single-Z profiles for each channel. Every GFP profile is divided by the GFP
+maximum and every Cy5 profile by the Cy5 maximum. Corrected TIFFs remain in
+intensity units; normalization applies only to analytical profiles and fits.
+Step 8 calculates its own two normalization constants across its selected
+T-by-Z collection.
 
 Steps 6 and 8 fit the full profile, reduced to at most 1,024 equal-width median
 bins, to:
@@ -92,7 +98,10 @@ model and slope definition, all-Z settings, and Z indices.
 
 Use `exp106_2026_07_30_overlap_pilot_config.json` for a two-timepoint Z15 trial,
 `exp106_2026_07_30_all_z_pilot_config.json` for a one-timepoint all-Z trial, and
-`exp106_2026_07_30_overlap_config.json` for the full experiment.
+`exp106_2026_07_30_overlap_config.json` for the full Z15 experiment. Use
+`exp106_2026_07_30_z11_config.json` for the 37-timepoint Z11 analysis without
+rerunning the all-Z section. A thesis-ready description of the implemented
+workflow is provided in `THESIS_METHODS.md`.
 
 ## Tests
 

@@ -13,6 +13,7 @@ from .outputs import (
     save_fit_heatmap, save_fit_metric_by_z_plot, save_fit_metric_timecourse_plot,
     save_max_difference_timecourse_plot, save_overlap_correction_plot,
     save_overlap_residual_plot, save_preview, save_rgb, save_tanh_fit_plot,
+    save_slope_timecourse_table,
     save_z_correction_coefficients_plot,
     save_tiff, write_json, write_rows_csv,
 )
@@ -362,10 +363,12 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
     steps = {1: "step_01_stitched_images", 2: "step_02_feathered_profiles_before_correction",
              3: "step_03_illumination_corrected", 4: "step_04_normalized_timecourse_profiles",
              5: "step_05_normalized_profiles", 6: "step_06_tanh_gradient_fits",
-             7: "step_07_max_intensity_differences", 8: "step_08_selected_timepoints_all_z"}
+             7: "step_07_max_intensity_differences", 8: "step_08_selected_timepoints_all_z",
+             9: "step_09_tanh_slopes_over_time"}
     dirs = {n: run_dir / name for n, name in steps.items()}
     for n in range(1, 8): dirs[n].mkdir(parents=True, exist_ok=False)
     if config.all_z_enabled: dirs[8].mkdir(parents=True, exist_ok=False)
+    dirs[9].mkdir(parents=True, exist_ok=False)
     overlap_dir = dirs[3] / "overlap_correction_diagnostics"; overlap_dir.mkdir()
     raw_paths = {c.label: {} for c in config.channels}; corrected_paths = {c.label: {} for c in config.channels}
     raw_hist = {c.label: empty_uint16_histogram() for c in config.channels}; corrected_hist = {c.label: empty_uint16_histogram() for c in config.channels}
@@ -461,6 +464,47 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
                                        ("midpoint_mm", "Midpoint (mm)", "midpoint"), ("width_mm", "Width (mm)", "width")):
             save_fit_metric_timecourse_plot(dirs[6] / f"{base}_z{config.z_index:02d}_{suffix}_over_time.png", fit_records,
                                             config.channels, metric, ylabel, f"{source_path.name} - tanh {ylabel.lower()} over time")
+        time_scale = 2.0
+        time_label = "Experimental time (ND2 timepoint × 2)"
+        slope_records = [
+            {**record, "experimental_time": int(record["timepoint"]) * time_scale}
+            for record in fit_records
+        ]
+        write_rows_csv(dirs[9] / "tanh_slopes_over_experimental_time.csv", slope_records)
+        write_json(dirs[9] / "tanh_slopes_over_experimental_time.json", slope_records)
+        for c in config.channels:
+            save_fit_metric_timecourse_plot(
+                dirs[9] / f"{base}_z{config.z_index:02d}_{c.label}_signed_slope_over_experimental_time.png",
+                fit_records,
+                (c,),
+                "signed_slope_per_mm",
+                "Signed slope (normalized/mm)",
+                f"{source_path.name} - Z{config.z_index} {c.label} signed tanh slope over time",
+                time_scale=time_scale,
+                xlabel=time_label,
+            )
+        save_fit_metric_timecourse_plot(
+            dirs[9] / f"{base}_z{config.z_index:02d}_GFP-Cy5_absolute_slope_over_experimental_time.png",
+            fit_records,
+            config.channels,
+            "absolute_slope_per_mm",
+            "Absolute slope (normalized/mm)",
+            f"{source_path.name} - Z{config.z_index} absolute tanh slopes over time",
+            time_scale=time_scale,
+            xlabel=time_label,
+        )
+        for metric, label in (
+            ("signed_slope_per_mm", "signed"),
+            ("absolute_slope_per_mm", "absolute"),
+        ):
+            save_slope_timecourse_table(
+                dirs[9] / f"{base}_z{config.z_index:02d}_GFP-Cy5_{label}_tanh_slope_table.png",
+                fit_records,
+                config.channels,
+                metric,
+                f"{source_path.name} - Z{config.z_index} {label} tanh slopes over time",
+                time_scale=time_scale,
+            )
         save_max_difference_timecourse_plot(dirs[7] / f"{base}_z{config.z_index:02d}_P02-P05_max_difference_over_time.png",
                                             max_records, config.channels, f"{source_path.name} - P02/P05 max differences")
         write_rows_csv(dirs[7] / f"{base}_z{config.z_index:02d}_P02-P05_max_differences.csv", max_records)
@@ -477,10 +521,10 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
                     "microscope_background": config.microscope_background, "correction_method": "overlap_quadratic",
                     "measured_overlap_percent": measured_overlap,
                     "measured_overlap_widths_px": overlap_widths,
-                    "correction_policy": "Z15 uses one fixed profile per channel across time; Step 8 estimates one profile per Z and quality-smooths its coefficients across Z",
+                    "correction_policy": f"Z{config.z_index} uses one fixed profile per channel across time; Step 8 estimates one profile per Z and quality-smooths its coefficients across Z",
                     "overlap_models": models, "profile_feathering": feather_details,
                     "profile_normalization_constants": constants,
-                    "profile_normalization_scope": "one maximum per channel across selected Z15 feathered profiles",
+                    "profile_normalization_scope": f"one maximum per channel across selected Z{config.z_index} feathered profiles",
                     "tanh_model": "left+(right-left)/2*(1+tanh((x-midpoint)/width))",
                     "tanh_slope_definition": "(right-left)/(2*width), normalized/mm",
                     "analysis_controls": {"feather_overlaps": config.feather_overlaps,
@@ -491,7 +535,9 @@ def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: Analysis
                                            "all_z_timepoints": list(config.all_z_timepoints),
                                            "all_z_coefficient_smoothing_penalty": config.all_z_coefficient_smoothing_penalty,
                                            "all_z_display_sample_stride": config.all_z_display_sample_stride,
-                                           "all_z_save_mosaic_tiffs": config.all_z_save_mosaic_tiffs},
+                                           "all_z_save_mosaic_tiffs": config.all_z_save_mosaic_tiffs,
+                                           "slope_timecourse_step": 9,
+                                           "slope_timecourse_time_scale": 2.0},
                     "legacy_linear_slopes_removed": True, "all_z_analysis": all_z, "display_scaling": display}
     write_json(run_dir / "run_metadata.json", metadata)
     return run_dir

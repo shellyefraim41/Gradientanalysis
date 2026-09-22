@@ -1,9 +1,10 @@
-"""Create the requested Z15 comparison and Step 8 all-Z presentations."""
+"""Create single-Z timecourse and optional Step 8 all-Z presentations."""
 
 from __future__ import annotations
 
 import argparse
 import io
+import json
 import re
 from pathlib import Path
 import sys
@@ -115,7 +116,97 @@ def _indexed_files(folder: Path, pattern: str) -> dict[int, Path]:
     return result
 
 
-def create_z15_comparison(run_dir: Path) -> Path:
+def _run_z_index(run_dir: Path, indexed_paths: dict[int, Path] | None = None) -> int:
+    metadata_path = run_dir / "run_metadata.json"
+    if metadata_path.is_file():
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        return int(metadata["z_index_requested"])
+    for path in (indexed_paths or {}).values():
+        match = re.search(r"_z(\d{2})_", path.name)
+        if match:
+            return int(match.group(1))
+    raise ValueError("Cannot determine the analyzed Z plane.")
+
+
+def _indexed_step1_files(run_dir: Path, suffix: str) -> dict[int, Path]:
+    result: dict[int, Path] = {}
+    for path in (run_dir / "step_01_stitched_images").glob(f"t[0-9][0-9][0-9]/*{suffix}"):
+        match = re.search(r"_t(\d{3})_", path.name)
+        if match:
+            result[int(match.group(1))] = path
+    return result
+
+
+def _single_z_image_group_slides(
+    presentation: Presentation,
+    label: str,
+    paths: dict[int, Path],
+    color: RGBColor,
+    z_index: int,
+) -> None:
+    timepoints = sorted(paths)
+    for offset in range(0, len(timepoints), 5):
+        chunk = timepoints[offset:offset + 5]
+        slide = _blank_slide(presentation)
+        start, end = chunk[0] * 2, chunk[-1] * 2
+        _text(
+            slide,
+            f"Z={z_index} · {label} · t={start}–{end}",
+            0.35,
+            0.12,
+            12.65,
+            0.45,
+            size=21,
+            color=color,
+            bold=True,
+            align=PP_ALIGN.CENTER,
+        )
+        row_height = 1.28
+        for index, timepoint in enumerate(chunk):
+            y = 0.72 + index * row_height
+            _text(
+                slide,
+                f"t={timepoint * 2}",
+                0.12,
+                y + 0.32,
+                0.75,
+                0.35,
+                size=13,
+                color=GRAY,
+                bold=True,
+                align=PP_ALIGN.CENTER,
+            )
+            _add_picture(slide, paths[timepoint], 0.92, y, 12.1, 1.05, compress=True)
+
+
+def create_single_z_image_presentation(run_dir: Path) -> Path:
+    groups = (
+        ("GFP–Cy5 merge", _indexed_step1_files(run_dir, "_GFP-Cy5_merge.png"), DARK),
+        ("GFP", _indexed_step1_files(run_dir, "_GFP_positions_left-to-right_preview.png"), GREEN),
+        ("Cy5", _indexed_step1_files(run_dir, "_Cy5_positions_left-to-right_preview.png"), MAGENTA),
+    )
+    if not groups[0][1]:
+        raise ValueError("No Step 1 timepoint images were found.")
+    expected = set(groups[0][1])
+    for label, paths, _ in groups:
+        if set(paths) != expected:
+            raise ValueError(f"Step 1 {label} images do not cover the same timepoints.")
+    z_index = _run_z_index(run_dir, groups[0][1])
+    presentation = _new_presentation()
+    _title_slide(
+        presentation,
+        "Gradient images across the timecourse",
+        f"Z{z_index} · five timepoints per slide · experimental time = ND2 timepoint × 2",
+    )
+    for label, paths, color in groups:
+        _section_slide(presentation, label, f"Z{z_index} · {len(paths)} timepoints")
+        _single_z_image_group_slides(presentation, label, paths, color, z_index)
+    output = run_dir / f"2026_07_30_z{z_index:02d}_gradient_images_timecourse_5-per-slide_t2.pptx"
+    presentation.save(output)
+    return output
+
+
+def create_single_z_comparison(run_dir: Path) -> Path:
     before = _indexed_files(
         run_dir / "step_02_feathered_profiles_before_correction",
         r"_t(\d{3})_.*before-correction\.png$",
@@ -127,11 +218,12 @@ def create_z15_comparison(run_dir: Path) -> Path:
     timepoints = sorted(set(before) & set(after))
     if not timepoints:
         raise ValueError("No matching Step 2 and Step 6 timepoints were found.")
+    z_index = _run_z_index(run_dir, before)
     presentation = _new_presentation()
     _title_slide(
         presentation,
         "Profiles before correction and after correction with tanh fit",
-        "Z15 · one slide per timepoint · experimental time = ND2 timepoint × 2",
+        f"Z{z_index} · one slide per timepoint · experimental time = ND2 timepoint × 2",
     )
     for timepoint in timepoints:
         slide = _blank_slide(presentation)
@@ -140,9 +232,14 @@ def create_z15_comparison(run_dir: Path) -> Path:
         _text(slide, "After correction + tanh fit · Step 06", 6.73, 0.67, 6.25, 0.35, size=16, color=MAGENTA, bold=True, align=PP_ALIGN.CENTER)
         _add_picture(slide, before[timepoint], 0.25, 1.05, 6.35, 6.15)
         _add_picture(slide, after[timepoint], 6.73, 1.05, 6.35, 6.15)
-    output = run_dir / "2026_07_30_profiles_before_vs_after_tanh_fit.pptx"
+    output = run_dir / f"2026_07_30_z{z_index:02d}_profiles_before_vs_after_tanh_fit.pptx"
     presentation.save(output)
     return output
+
+
+def create_z15_comparison(run_dir: Path) -> Path:
+    """Backward-compatible alias for callers of the original helper."""
+    return create_single_z_comparison(run_dir)
 
 
 def _z_number(path: Path) -> int:
@@ -245,10 +342,15 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("run_dir", type=Path)
     args = parser.parse_args()
-    first = create_z15_comparison(args.run_dir)
-    second = create_step8_presentation(args.run_dir)
-    print(f"Created: {first.resolve()}")
-    print(f"Created: {second.resolve()}")
+    created = [
+        create_single_z_image_presentation(args.run_dir),
+        create_single_z_comparison(args.run_dir),
+    ]
+    step8_stitched = args.run_dir / "step_08_selected_timepoints_all_z" / "stitched_images"
+    if step8_stitched.is_dir():
+        created.append(create_step8_presentation(args.run_dir))
+    for path in created:
+        print(f"Created: {path.resolve()}")
     return 0
 
 

@@ -1,0 +1,22 @@
+{
+  "z_index": 11,
+  "z_is_one_based": true,
+  "timepoints": null,
+  "position_x_order": "descending",
+  "microscope_background": 100.0,
+  "apply_illumination_correction": true,
+  "correction_method": "overlap_quadratic",
+  "overlap_min_signal": 5.0,
+  "preview_low_percentile": 1.0,
+  "preview_high_percentile": 99.8,
+  "save_corrected_tiles": true,
+  "feather_overlaps": true,
+  "normalize_profiles": true,
+  "tanh_fit_enabled": true,
+  "tanh_max_points": 1024,
+  "all_z_enabled": false,
+  "all_z_timepoints": [2, 10, 14, 24, 36],
+  "all_z_coefficient_smoothing_penalty": 10.0,
+  "all_z_display_sample_stride": 32,
+  "all_z_save_mosaic_tiffs": true
+}

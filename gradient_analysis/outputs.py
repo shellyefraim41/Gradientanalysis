@@ -566,6 +566,9 @@ def save_fit_metric_timecourse_plot(
     metric: str,
     ylabel: str,
     title: str,
+    *,
+    time_scale: float = 1.0,
+    xlabel: str = "Timepoint",
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(figsize=(9, 5), constrained_layout=True)
@@ -575,16 +578,72 @@ def save_fit_metric_timecourse_plot(
             key=lambda record: int(record["timepoint"]),
         )
         ax.plot(
-            [int(record["timepoint"]) for record in selected],
+            [int(record["timepoint"]) * time_scale for record in selected],
             [float(record[metric]) for record in selected],
             marker="o",
             color=channel.plot_color,
             label=channel.label,
         )
-    ax.set(title=title, xlabel="Timepoint", ylabel=ylabel)
+    ax.set(title=title, xlabel=xlabel, ylabel=ylabel)
     ax.grid(alpha=0.2)
     ax.legend()
     fig.savefig(path, dpi=180)
+    plt.close(fig)
+
+
+def save_slope_timecourse_table(
+    path: Path,
+    records: list[dict[str, object]],
+    channels: tuple[ChannelConfig, ...],
+    metric: str,
+    title: str,
+    *,
+    time_scale: float = 1.0,
+) -> None:
+    """Save one fitted-slope metric as a presentation-ready table."""
+    if metric not in {"signed_slope_per_mm", "absolute_slope_per_mm"}:
+        raise ValueError(f"Unsupported slope table metric: {metric}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    by_key = {
+        (int(record["timepoint"]), str(record["channel"])): record
+        for record in records
+    }
+    timepoints = sorted({timepoint for timepoint, _ in by_key})
+    headers = ["Experimental time", *(channel.label for channel in channels)]
+    rows: list[list[str]] = []
+    for timepoint in timepoints:
+        row = [f"{timepoint * time_scale:g}"]
+        for channel in channels:
+            record = by_key[(timepoint, channel.label)]
+            row.append(f"{float(record[metric]):.4f}")
+        rows.append(row)
+
+    figure_height = max(6.0, 0.38 * (len(rows) + 3))
+    fig, ax = plt.subplots(figsize=(12, figure_height), constrained_layout=True)
+    ax.axis("off")
+    table = ax.table(cellText=rows, colLabels=headers, cellLoc="center", loc="center")
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+    table.scale(1.0, 1.28)
+    for column in range(len(headers)):
+        cell = table[(0, column)]
+        cell.set_facecolor("#30343b")
+        cell.get_text().set_color("white")
+        cell.get_text().set_weight("bold")
+    for row_index in range(1, len(rows) + 1):
+        if row_index % 2 == 0:
+            for column in range(len(headers)):
+                table[(row_index, column)].set_facecolor("#f2f3f5")
+    ax.set_title(title, fontsize=16, fontweight="bold", pad=18)
+    fig.text(
+        0.5,
+        0.005,
+        "Slope units: normalized intensity per mm",
+        ha="center",
+        va="bottom",
+        fontsize=10,
+    )
+    fig.savefig(path, dpi=180, bbox_inches="tight")
     plt.close(fig)
 
 
