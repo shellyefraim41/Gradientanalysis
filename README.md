@@ -100,8 +100,9 @@ Use `exp106_2026_07_30_overlap_pilot_config.json` for a two-timepoint Z15 trial,
 `exp106_2026_07_30_all_z_pilot_config.json` for a one-timepoint all-Z trial, and
 `exp106_2026_07_30_overlap_config.json` for the full Z15 experiment. Use
 `exp106_2026_07_30_z11_config.json` for the 37-timepoint Z11 analysis without
-rerunning the all-Z section. A thesis-ready description of the implemented
-workflow is provided in `THESIS_METHODS.md`.
+rerunning the all-Z section. A concise paper-style description of the
+implemented workflow is provided as `THESIS_METHODS.md`, `PAPER_METHODS.txt`,
+and `PAPER_METHODS.docx`.
 
 ## Tests
 
