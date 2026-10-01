@@ -48,6 +48,19 @@ class AnalysisConfig:
     all_z_coefficient_smoothing_penalty: float = 10.0
     all_z_display_sample_stride: int = 32
     all_z_save_mosaic_tiffs: bool = True
+    calibration_directory: str | None = None
+    calibration_reference_concentration_ug_ml: float = 32.0
+    calibration_z_integrated: bool = False
+    calibration_block_size_px: int = 128
+    flatfield_block_size_px: int = 8
+    flatfield_smoothing_sigma_coarse_px: float = 8.0
+    flatfield_min_relative_illumination: float = 0.25
+    profile_outlier_sigma: float = 6.0
+    profile_minimum_deviation: float = 20.0
+    large_dic_path: str | None = None
+    large_dic_display_low: float = 100.0
+    large_dic_display_high: float = 250.0
+    experimental_hours_per_timepoint: float = 2.0
 
     @classmethod
     def from_json(cls, path: str | Path | None) -> "AnalysisConfig":
@@ -91,8 +104,10 @@ class AnalysisConfig:
         return self.z_index - 1 if self.z_is_one_based else self.z_index
 
     def __post_init__(self) -> None:
-        if self.correction_method != "overlap_quadratic":
-            raise ValueError("correction_method must be 'overlap_quadratic'")
+        if self.correction_method not in {"overlap_quadratic", "calibration_flatfield"}:
+            raise ValueError(
+                "correction_method must be 'overlap_quadratic' or 'calibration_flatfield'"
+            )
         if self.overlap_min_signal < 0:
             raise ValueError("overlap_min_signal must be non-negative")
         if self.tanh_max_points < 4:
@@ -103,3 +118,19 @@ class AnalysisConfig:
             raise ValueError("all_z_coefficient_smoothing_penalty must be non-negative")
         if self.all_z_display_sample_stride < 1:
             raise ValueError("all_z_display_sample_stride must be at least 1")
+        if self.correction_method == "calibration_flatfield" and not self.calibration_directory:
+            raise ValueError("calibration_directory is required for calibration_flatfield")
+        if self.calibration_reference_concentration_ug_ml <= 0:
+            raise ValueError("calibration_reference_concentration_ug_ml must be positive")
+        if self.calibration_block_size_px < 1 or self.flatfield_block_size_px < 1:
+            raise ValueError("Calibration block sizes must be positive")
+        if self.flatfield_smoothing_sigma_coarse_px <= 0:
+            raise ValueError("Flat-field smoothing sigma must be positive")
+        if not 0 < self.flatfield_min_relative_illumination <= 1:
+            raise ValueError("Flat-field minimum relative illumination must be in (0, 1]")
+        if self.profile_outlier_sigma <= 0 or self.profile_minimum_deviation < 0:
+            raise ValueError("Profile outlier controls are invalid")
+        if self.large_dic_display_high <= self.large_dic_display_low:
+            raise ValueError("large_dic_display_high must exceed large_dic_display_low")
+        if self.experimental_hours_per_timepoint <= 0:
+            raise ValueError("experimental_hours_per_timepoint must be positive")

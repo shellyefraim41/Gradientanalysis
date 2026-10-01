@@ -356,8 +356,10 @@ def _run_all_z(source, config, x_axes, step8, base):
 
 
 def run_pipeline(nd2_path: str | Path, output_root: str | Path, config: AnalysisConfig) -> Path:
-    if config.apply_illumination_correction and config.correction_method != "overlap_quadratic":
-        raise ValueError("The revised pipeline requires correction_method='overlap_quadratic'.")
+    if config.correction_method == "calibration_flatfield":
+        from .calibrated_pipeline import run_calibrated_pipeline
+
+        return run_calibrated_pipeline(nd2_path, output_root, config)
     source_path = Path(nd2_path); base = _safe_stem(source_path.stem)
     run_dir = Path(output_root) / f"run_{base}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     steps = {1: "step_01_stitched_images", 2: "step_02_feathered_profiles_before_correction",

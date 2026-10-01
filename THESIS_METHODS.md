@@ -33,4 +33,4 @@ with smoothed, overlap-derived per-Z corrections.
 
 Quantification used TIFF data; PNG files were only for visualization. Code and
 configuration files are available at
-https://github.com/shellyefraim41/GradientanalysisExp106.
+https://github.com/shellyefraim41/Gradientanalysis.

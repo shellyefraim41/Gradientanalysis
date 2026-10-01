@@ -6,26 +6,32 @@ from unittest.mock import patch
 import numpy as np
 
 from gradient_analysis.processing import (
+    block_median,
+    build_artifact_safe_flatfield,
     choose_reference,
     colorize_scaled,
     correct_tile,
     correct_tile_2d,
     correction_curve,
     empty_uint16_histogram,
+    empirical_concentration,
     fit_overlap_log_quadratic,
     fit_tanh_profile,
     feather_profiles,
     feather_tiles_2d,
+    feather_tiles_2d_union,
     fitted_illumination_profile,
     histogram_percentile_range,
     image_percentile_range,
     merge_rgb,
     overlap_log_ratio_samples,
     physical_x_axes_mm,
+    persistent_hot_pixel_mask,
     profile_curvature,
     profile_normalization_constants,
     quadratic_illumination_profile,
     reference_candidate_score,
+    robust_y_profile,
     smoothed_illumination_image,
     smoothed_illumination_profile,
     subtract_background_floor,
@@ -112,6 +118,18 @@ class FeatherAndTanhTests(unittest.TestCase):
         self.assertEqual(details["common_y_height_px"], 4)
         self.assertEqual(details["output_width_px"], 10)
 
+    def test_union_feather_retains_full_stage_rectangle(self):
+        left = np.ones((3, 4), dtype=float)
+        right = np.full((3, 4), 2.0)
+        mosaic, valid, details = feather_tiles_2d_union(
+            [left, right], [0.0, 3.0], [0.0, 1.0]
+        )
+        self.assertEqual(mosaic.shape, (4, 7))
+        self.assertEqual(valid.shape, mosaic.shape)
+        self.assertTrue(np.isnan(mosaic[0, -1]))
+        self.assertTrue(np.isnan(mosaic[-1, 0]))
+        self.assertEqual(details["overlap_widths_px"], [1])
+
     def test_z_coefficient_smoothing_downweights_bad_plane(self):
         expected = np.linspace(-0.2, 0.2, 9)
         measured = expected.copy()
@@ -168,6 +186,48 @@ class FeatherAndTanhTests(unittest.TestCase):
 
 
 class ProcessingTests(unittest.TestCase):
+    def test_robust_profile_rejects_local_stain(self):
+        image = np.full((40, 8), 100.0)
+        image[:8, 3:5] = 1000.0
+        profile, valid, details = robust_y_profile(
+            image, outlier_sigma=5.0, minimum_deviation=20.0
+        )
+        np.testing.assert_allclose(profile, 100.0)
+        self.assertFalse(np.all(valid[:8, 3:5]))
+        self.assertGreater(details["excluded_pixel_count"], 0)
+
+    def test_hot_pixel_mask_detects_isolated_persistent_pixel(self):
+        blank_minimum = np.full((21, 21), 100.0)
+        blank_minimum[10, 10] = 600.0
+        mask, details = persistent_hot_pixel_mask(blank_minimum)
+        self.assertTrue(mask[10, 10])
+        self.assertEqual(details["hot_pixel_count"], 1)
+
+    def test_block_median_and_flatfield_recover_broad_profile(self):
+        y, x = np.indices((32, 32), dtype=float)
+        expected = 0.75 + 0.25 * (1.0 - ((x - 15.5) / 15.5) ** 2) + 0.05 * y / 31
+        planes = np.stack([expected * scale for scale in (0.8, 1.0, 1.2)])
+        coarse = np.stack(
+            [block_median(plane, 4) / np.median(block_median(plane, 4)) for plane in planes]
+        )
+        flatfield, details = build_artifact_safe_flatfield(
+            coarse, expected.shape, smoothing_sigma=1.0
+        )
+        self.assertEqual(flatfield.shape, expected.shape)
+        self.assertAlmostEqual(float(np.median(flatfield)), 1.0, places=5)
+        self.assertLess(np.std((expected / flatfield) / np.median(expected / flatfield)), 0.07)
+        self.assertGreater(details["flatfield_min"], 0)
+
+    def test_empirical_concentration_interpolates_and_flags_range(self):
+        signal = np.array([-1.0, 5.0, 15.0, 25.0])
+        converted, outside = empirical_concentration(
+            signal,
+            np.array([0.0, 10.0, 20.0]),
+            np.array([0.0, 5.0, 10.0]),
+        )
+        np.testing.assert_allclose(converted, [0.0, 2.5, 7.5, 10.0])
+        np.testing.assert_array_equal(outside, [True, False, False, True])
+
     def test_background_subtraction_floors_negative_values(self):
         image = np.array([[75, 100, 125]], dtype=np.uint16)
         np.testing.assert_array_equal(subtract_background_floor(image, 100), [[0, 0, 25]])

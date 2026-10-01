@@ -8,4 +8,4 @@ Fluorescence was averaged along Y to obtain one-dimensional gradients. Profiles 
 
 Each normalized profile was fitted to y(x) = L + (R − L)/2 × [1 + tanh((x − x₀)/w)], where L and R are the plateaus, x₀ is the midpoint, and w is the transition width. Robust bounded nonlinear least squares was used. Midpoint slope was m = (R − L)/(2w); signed slopes described direction and absolute slopes described steepness. Selected timepoints were also analyzed across Z with smoothed, overlap-derived per-Z corrections.
 
-Quantification used TIFF data; PNG files were only for visualization. Code and configuration files are available at https://github.com/shellyefraim41/GradientanalysisExp106.
+Quantification used TIFF data; PNG files were only for visualization. Code and configuration files are available at https://github.com/shellyefraim41/Gradientanalysis.

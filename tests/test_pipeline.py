@@ -39,6 +39,16 @@ class PipelineTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "overlap_quadratic"):
             AnalysisConfig(correction_method="reference_quadratic")
 
+    def test_calibration_flatfield_requires_and_accepts_directory_setting(self):
+        with self.assertRaisesRegex(ValueError, "calibration_directory"):
+            AnalysisConfig(correction_method="calibration_flatfield")
+        config = AnalysisConfig(
+            correction_method="calibration_flatfield",
+            calibration_directory="calibration",
+            calibration_z_integrated=True,
+        )
+        self.assertEqual(config.correction_method, "calibration_flatfield")
+
     def test_step1_timepoint_folder_is_zero_padded(self):
         self.assertEqual(_timepoint_folder(Path("step_01_stitched_images"), 18), Path("step_01_stitched_images") / "t018")
 

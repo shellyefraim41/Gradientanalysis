@@ -22,6 +22,177 @@ def x_profile(image: np.ndarray) -> np.ndarray:
     return np.mean(image, axis=0, dtype=np.float64)
 
 
+def robust_y_profile(
+    image: np.ndarray,
+    *,
+    outlier_sigma: float = 6.0,
+    minimum_deviation: float = 20.0,
+) -> tuple[np.ndarray, np.ndarray, dict[str, float]]:
+    """Return a stain-resistant column profile and the accepted-pixel mask.
+
+    The physical dextran gradient is expected along X.  Each column is therefore
+    summarized over Y after rejecting pixels that depart strongly from that
+    column's median.  This protects the quantitative profile from localized plate
+    stains without altering the saved image.
+    """
+    values = np.asarray(image, dtype=np.float64)
+    if values.ndim != 2:
+        raise ValueError("robust_y_profile requires a 2-D image.")
+    if outlier_sigma <= 0 or minimum_deviation < 0:
+        raise ValueError("Outlier controls must be positive/non-negative.")
+    center = np.nanmedian(values, axis=0)
+    absolute_residual = np.abs(values - center[np.newaxis, :])
+    mad = np.nanmedian(absolute_residual, axis=0)
+    threshold = np.maximum(outlier_sigma * 1.4826 * mad, minimum_deviation)
+    valid = np.isfinite(values) & (absolute_residual <= threshold[np.newaxis, :])
+    masked = np.where(valid, values, np.nan)
+    profile = np.nanmedian(masked, axis=0)
+    missing = ~np.isfinite(profile)
+    profile[missing] = center[missing]
+    return profile, valid, {
+        "excluded_pixel_count": int(valid.size - np.count_nonzero(valid)),
+        "excluded_pixel_fraction": float(1.0 - np.count_nonzero(valid) / valid.size),
+        "median_column_mad": float(np.nanmedian(mad)),
+        "outlier_sigma": float(outlier_sigma),
+        "minimum_deviation": float(minimum_deviation),
+    }
+
+
+def persistent_hot_pixel_mask(
+    minimum_across_stack: np.ndarray,
+    *,
+    sigma: float = 12.0,
+    minimum_excess: float = 25.0,
+) -> tuple[np.ndarray, dict[str, float]]:
+    """Detect persistent isolated bright pixels in a blank-image stack summary."""
+    from scipy.ndimage import median_filter
+
+    image = np.asarray(minimum_across_stack, dtype=np.float64)
+    if image.ndim != 2:
+        raise ValueError("Hot-pixel detection requires a 2-D image.")
+    local = median_filter(image, size=3, mode="reflect")
+    residual = image - local
+    center = float(np.median(residual))
+    mad = float(np.median(np.abs(residual - center)))
+    threshold = max(float(minimum_excess), center + float(sigma) * 1.4826 * mad)
+    mask = residual > threshold
+    return mask, {
+        "hot_pixel_count": int(np.count_nonzero(mask)),
+        "hot_pixel_fraction": float(np.count_nonzero(mask) / mask.size),
+        "local_residual_mad": mad,
+        "detection_threshold": threshold,
+    }
+
+
+def despike_image(
+    image: np.ndarray,
+    persistent_mask: np.ndarray | None = None,
+    *,
+    sigma: float = 12.0,
+    minimum_excess: float = 50.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Replace isolated detector spikes with a 3-by-3 local median."""
+    from scipy.ndimage import median_filter
+
+    values = np.asarray(image, dtype=np.float32)
+    local = median_filter(values, size=3, mode="reflect")
+    residual = values.astype(np.float64) - local.astype(np.float64)
+    center = float(np.median(residual))
+    mad = float(np.median(np.abs(residual - center)))
+    threshold = max(float(minimum_excess), center + float(sigma) * 1.4826 * mad)
+    mask = residual > threshold
+    if persistent_mask is not None:
+        if persistent_mask.shape != values.shape:
+            raise ValueError("Persistent hot-pixel mask shape does not match image.")
+        mask |= persistent_mask
+    repaired = values.copy()
+    repaired[mask] = local[mask]
+    return repaired, mask
+
+
+def block_median(image: np.ndarray, block_size: int) -> np.ndarray:
+    """Reduce a 2-D image to complete blocks using their medians."""
+    values = np.asarray(image)
+    if values.ndim != 2 or block_size < 1:
+        raise ValueError("block_median requires a 2-D image and positive block size.")
+    height = values.shape[0] // block_size * block_size
+    width = values.shape[1] // block_size * block_size
+    if height == 0 or width == 0:
+        raise ValueError("Block size is larger than the image.")
+    reshaped = values[:height, :width].reshape(
+        height // block_size, block_size, width // block_size, block_size
+    )
+    return np.nanmedian(reshaped, axis=(1, 3))
+
+
+def build_artifact_safe_flatfield(
+    normalized_coarse_planes: np.ndarray,
+    output_shape: tuple[int, int],
+    *,
+    smoothing_sigma: float = 8.0,
+    outlier_sigma: float = 6.0,
+    minimum_relative_illumination: float = 0.25,
+) -> tuple[np.ndarray, dict[str, float]]:
+    """Build a smooth median-one FFC map from normalized high-standard planes."""
+    from scipy.ndimage import gaussian_filter, zoom
+
+    planes = np.asarray(normalized_coarse_planes, dtype=np.float64)
+    if planes.ndim != 3 or planes.shape[0] < 2:
+        raise ValueError("At least two coarse flat-field planes are required.")
+    if smoothing_sigma <= 0 or not 0 < minimum_relative_illumination <= 1:
+        raise ValueError("Invalid flat-field smoothing or floor setting.")
+    composite = np.nanmedian(planes, axis=0)
+    preliminary = gaussian_filter(composite, smoothing_sigma, mode="reflect")
+    residual = composite - preliminary
+    center = float(np.nanmedian(residual))
+    mad = float(np.nanmedian(np.abs(residual - center)))
+    tolerance = max(outlier_sigma * 1.4826 * mad, 0.01)
+    valid = np.isfinite(composite) & (np.abs(residual - center) <= tolerance)
+    numerator = gaussian_filter(np.where(valid, composite, 0.0), smoothing_sigma, mode="reflect")
+    denominator = gaussian_filter(valid.astype(np.float64), smoothing_sigma, mode="reflect")
+    coarse = numerator / np.maximum(denominator, np.finfo(float).eps)
+    factors = (output_shape[0] / coarse.shape[0], output_shape[1] / coarse.shape[1])
+    flatfield = zoom(coarse, factors, order=3, mode="reflect", prefilter=True)
+    flatfield = flatfield[: output_shape[0], : output_shape[1]]
+    if flatfield.shape != output_shape:
+        padded = np.empty(output_shape, dtype=np.float64)
+        padded[: flatfield.shape[0], : flatfield.shape[1]] = flatfield
+        padded[flatfield.shape[0] :, :] = padded[flatfield.shape[0] - 1, :]
+        padded[:, flatfield.shape[1] :] = padded[:, flatfield.shape[1] - 1, None]
+        flatfield = padded
+    normalization = float(np.nanmedian(flatfield))
+    flatfield /= normalization
+    flatfield = np.maximum(flatfield, minimum_relative_illumination)
+    return flatfield.astype(np.float32), {
+        "normalization_before_median_one": normalization,
+        "coarse_invalid_fraction": float(1.0 - np.count_nonzero(valid) / valid.size),
+        "coarse_residual_mad": mad,
+        "smoothing_sigma_coarse_px": float(smoothing_sigma),
+        "minimum_relative_illumination": float(minimum_relative_illumination),
+        "flatfield_min": float(np.min(flatfield)),
+        "flatfield_median": float(np.median(flatfield)),
+        "flatfield_max": float(np.max(flatfield)),
+    }
+
+
+def empirical_concentration(
+    signal: np.ndarray,
+    standard_signals: np.ndarray,
+    standard_concentrations: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Invert a monotonic empirical calibration and flag out-of-range values."""
+    values = np.asarray(signal, dtype=np.float64)
+    xp = np.asarray(standard_signals, dtype=np.float64)
+    fp = np.asarray(standard_concentrations, dtype=np.float64)
+    if xp.ndim != 1 or fp.shape != xp.shape or xp.size < 2:
+        raise ValueError("Calibration signals and concentrations must be equal 1-D arrays.")
+    if np.any(~np.isfinite(xp)) or np.any(np.diff(xp) <= 0) or np.any(np.diff(fp) < 0):
+        raise ValueError("Calibration standards must be finite and strictly increasing in signal.")
+    outside = (values < xp[0]) | (values > xp[-1])
+    converted = np.interp(values, xp, fp, left=fp[0], right=fp[-1])
+    return converted, outside
+
+
 def physical_x_axes_mm(
     position_x_um: list[float],
     pixel_size_um: float,
@@ -190,6 +361,65 @@ def feather_tiles_2d(
         "output_width_px": output_width,
         "maximum_x_rounding_error_px": float(np.max(np.abs(x_fractional - np.rint(x_fractional)))),
         "maximum_y_rounding_error_px": float(np.max(np.abs(y_fractional - np.rint(y_fractional)))),
+    }
+
+
+def feather_tiles_2d_union(
+    tiles: list[np.ndarray],
+    x_starts_px: list[float],
+    y_starts_px: list[float],
+) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
+    """Stage-align tiles over their full union for display and DIC registration."""
+    if not tiles or not (len(tiles) == len(x_starts_px) == len(y_starts_px)):
+        raise ValueError("Tiles and stage starts must be non-empty and equal length.")
+    shapes = {tile.shape for tile in tiles}
+    if len(shapes) != 1 or tiles[0].ndim != 2:
+        raise ValueError("Every union-mosaic tile must be an equally sized 2-D array.")
+    height, width = tiles[0].shape
+    x = np.rint(np.asarray(x_starts_px, dtype=float)).astype(int)
+    y = np.rint(np.asarray(y_starts_px, dtype=float)).astype(int)
+    x -= int(np.min(x))
+    y -= int(np.min(y))
+    output_height = int(np.max(y + height))
+    output_width = int(np.max(x + width))
+    weighted = np.zeros((output_height, output_width), dtype=np.float32)
+    weights = np.zeros((output_height, output_width), dtype=np.float32)
+    local_weights: list[np.ndarray] = []
+    overlaps: list[int] = []
+    for index in range(len(tiles)):
+        weight = np.ones(width, dtype=np.float32)
+        if index:
+            overlap = int(x[index - 1] + width - x[index])
+            if overlap < 0 or overlap >= width:
+                raise ValueError("Stage X offsets contain a gap or non-advancing tile.")
+            if overlap:
+                phase = np.linspace(0.0, np.pi, overlap, dtype=np.float32)
+                weight[:overlap] *= 0.5 * (1.0 - np.cos(phase))
+        if index + 1 < len(tiles):
+            overlap = int(x[index] + width - x[index + 1])
+            overlaps.append(overlap)
+            if overlap < 0 or overlap >= width:
+                raise ValueError("Stage X offsets contain a gap or non-advancing tile.")
+            if overlap:
+                phase = np.linspace(0.0, np.pi, overlap, dtype=np.float32)
+                weight[-overlap:] *= 0.5 * (1.0 + np.cos(phase))
+        local_weights.append(weight)
+    for tile, x_start, y_start, weight in zip(tiles, x, y, local_weights):
+        target_y = slice(int(y_start), int(y_start) + height)
+        target_x = slice(int(x_start), int(x_start) + width)
+        weighted[target_y, target_x] += tile.astype(np.float32, copy=False) * weight[np.newaxis, :]
+        weights[target_y, target_x] += weight[np.newaxis, :]
+    valid = weights > 0
+    mosaic = np.full_like(weighted, np.nan)
+    mosaic[valid] = weighted[valid] / weights[valid]
+    return mosaic, valid, {
+        "method": "stage_aligned_2d_cosine_feather_union",
+        "x_starts_px_rounded": x.tolist(),
+        "y_starts_px_rounded": y.tolist(),
+        "overlap_widths_px": overlaps,
+        "output_height_px": output_height,
+        "output_width_px": output_width,
+        "valid_pixel_fraction": float(np.count_nonzero(valid) / valid.size),
     }
 
 

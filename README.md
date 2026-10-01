@@ -54,6 +54,41 @@ TIFFs, GFP/Cy5 previews, and a merged preview for every Z. PNGs use one shared
 channel-specific display range across all selected timepoints and Z planes;
 TIFFs retain measurement intensities.
 
+## Calibration-flat-field pilot (September 2026)
+
+`exp106_2026_09_27_t12_calibrated_pilot_config.json` analyzes only `t012`
+(24 hours) from the September acquisition. The DIC channel in `gradient.nd2`
+is ignored. Numeric calibration filenames are interpreted as ng/mL and divided
+by 1000 for reporting in µg/mL.
+
+The pilot uses the homogeneous 32 µg/mL stack to estimate one smooth 2-D
+flat-field per fluorescence channel. Each calibration Z plane is normalized
+before the planes are combined, so axial brightness changes and the absolute Z
+offset between plates do not enter the correction. The 0 µg/mL standard sets
+the channel background and identifies persistent detector hot pixels.
+
+Because calibration and experiment were acquired on different plates, absolute
+concentration is calculated from fluorescence integrated across all 22 Z planes
+rather than by matching individual Z indices. Each standard is summarized with
+block medians after background subtraction and FFC. The primary conversion is
+a monotonic piecewise-linear interpolation through all measured standards; a
+linear fit and its residuals are retained as diagnostics. Experimental profiles
+use robust medians over Y, so localized plate stains remain visible in the saved
+images but do not dominate the quantitative gradient.
+
+The large 10× DIC image is cropped from stage metadata to the physical rectangle
+covered by all gradient positions. Its PNG uses the requested 100–250 display
+window and is placed above the Z-integrated GFP/Cy5 mosaic in an aligned
+composite. The TIFF crop retains the original intensity values.
+
+Run the pilot with:
+
+```powershell
+python GradientAnalysis.py "D:\Users\Shelly\2026_09_27_Exp106_try4\gradient.nd2" `
+  --config exp106_2026_09_27_t12_calibrated_pilot_config.json `
+  --output outputs\2026_09_27_exp106_try4_calibration_flatfield_t12_24h
+```
+
 For Steps 4-6 and 9, one maximum is calculated from all corrected, feathered
 single-Z profiles for each channel. Every GFP profile is divided by the GFP
 maximum and every Cy5 profile by the Cy5 maximum. Corrected TIFFs remain in
