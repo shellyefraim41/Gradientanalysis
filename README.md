@@ -1,5 +1,12 @@
 # GradientAnalysis
 
+For model handoff and continuation context, start with
+[MODEL_HANDOFF.md](MODEL_HANDOFF.md). Dataset paths and metadata are in
+[docs/PROJECT_INVENTORY.md](docs/PROJECT_INVENTORY.md), the September method is
+documented in
+[docs/SEPTEMBER_CALIBRATION_WORKFLOW.md](docs/SEPTEMBER_CALIBRATION_WORKFLOW.md),
+and unresolved decisions are listed in [docs/NEXT_STEPS.md](docs/NEXT_STEPS.md).
+
 Memory-conscious analysis of a Nikon ND2 time course containing multiple stage
 positions, Z planes, and GFP/Cy5 channels. The program reads one 2-D plane at a
 time rather than loading the complete acquisition into RAM.
