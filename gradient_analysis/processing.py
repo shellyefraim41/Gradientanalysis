@@ -514,22 +514,28 @@ def fit_tanh_profile(
     *,
     max_points: int = 1024,
     pixel_size_mm: float | None = None,
+    plateau_bounds: tuple[float, float] = (-0.1, 1.1),
 ) -> dict[str, object]:
-    """Robustly fit a normalized profile and report its midpoint slope."""
+    """Robustly fit a normalized profile and report its midpoint slope.
+
+    ``plateau_bounds`` limits both plateaus in normalized units; the default
+    keeps plateaus close to the observed range.
+    """
     from scipy.optimize import least_squares
 
+    plateau_low, plateau_high = (float(value) for value in plateau_bounds)
     fit_x, fit_y = _median_bin_profile(x, y, max_points)
     span = float(fit_x[-1] - fit_x[0])
     if span <= 0:
         raise ValueError("Physical x coordinates must span a positive distance.")
     edge_count = max(1, int(np.ceil(0.05 * fit_y.size)))
-    initial_left = float(np.clip(np.median(fit_y[:edge_count]), -0.1, 1.1))
-    initial_right = float(np.clip(np.median(fit_y[-edge_count:]), -0.1, 1.1))
+    initial_left = float(np.clip(np.median(fit_y[:edge_count]), plateau_low, plateau_high))
+    initial_right = float(np.clip(np.median(fit_y[-edge_count:]), plateau_low, plateau_high))
     halfway = 0.5 * (initial_left + initial_right)
     initial_midpoint = float(fit_x[np.argmin(np.abs(fit_y - halfway))])
     minimum_width = max(float(pixel_size_mm or np.median(np.diff(fit_x))), np.finfo(float).eps)
-    lower = np.array([-0.1, -0.1, fit_x[0], minimum_width], dtype=np.float64)
-    upper = np.array([1.1, 1.1, fit_x[-1], 2.0 * span], dtype=np.float64)
+    lower = np.array([plateau_low, plateau_low, fit_x[0], minimum_width], dtype=np.float64)
+    upper = np.array([plateau_high, plateau_high, fit_x[-1], 2.0 * span], dtype=np.float64)
     initial = np.array(
         [initial_left, initial_right, initial_midpoint, max(span / 10.0, minimum_width * 2.0)]
     )

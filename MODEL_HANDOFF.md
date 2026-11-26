@@ -12,6 +12,18 @@ scientific or implementation decisions.
 - [General pipeline README](README.md)
 - [Completed t012 pilot report](PILOT_2026_09_27_T012_REPORT.md)
 
+## Update 2026-10-04: method chosen, full experiment run
+
+The correction/calibration/depth decisions are recorded in
+[docs/NEXT_STEPS.md](docs/NEXT_STEPS.md) ("Decisions made on 2026-10-04"). In short:
+hybrid correction, 0–24 µg/mL linear calibration, main result at Z11 with a Z3–Z12
+robustness check, objective stain mask, bridge marked from DIC. The current workflow is
+`scripts/run_gradient_review.py`; outputs use chronological, descriptively named step
+folders with a `00_README_how_to_read_this_folder.md` guide. Shelly asked for: axis
+labels with units in square brackets, descriptive titles, one plot per timepoint with
+fits, and concentration / normalized intensity / intensity versions of every profile plot.
+The sections below describe the earlier September pilot and remain accurate as history.
+
 ## User and project intent
 
 The user is Shelly. She is analyzing opposing GFP- and Cy5-labeled dextran

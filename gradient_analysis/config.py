@@ -50,6 +50,7 @@ class AnalysisConfig:
     all_z_save_mosaic_tiffs: bool = True
     calibration_directory: str | None = None
     calibration_reference_concentration_ug_ml: float = 32.0
+    calibration_filename_unit: str = "ng_per_ml"
     calibration_z_integrated: bool = False
     calibration_block_size_px: int = 128
     flatfield_block_size_px: int = 8
@@ -120,6 +121,8 @@ class AnalysisConfig:
             raise ValueError("all_z_display_sample_stride must be at least 1")
         if self.correction_method == "calibration_flatfield" and not self.calibration_directory:
             raise ValueError("calibration_directory is required for calibration_flatfield")
+        if self.calibration_filename_unit not in {"ng_per_ml", "ug_per_ml"}:
+            raise ValueError("calibration_filename_unit must be 'ng_per_ml' or 'ug_per_ml'")
         if self.calibration_reference_concentration_ug_ml <= 0:
             raise ValueError("calibration_reference_concentration_ug_ml must be positive")
         if self.calibration_block_size_px < 1 or self.flatfield_block_size_px < 1:

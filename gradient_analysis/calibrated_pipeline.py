@@ -67,17 +67,23 @@ def _channel_indices(file: nd2.ND2File, channels: tuple[ChannelConfig, ...]) -> 
     return result
 
 
-def _discover_standards(directory: Path) -> list[tuple[float, Path]]:
-    standards = sorted(
-        (int(path.stem) / 1000.0, path)
-        for path in directory.glob("*.nd2")
-        if path.stem.isdigit()
-    )
+def _discover_standards(directory: Path, filename_unit: str = "ng_per_ml") -> list[tuple[float, Path]]:
+    """Numeric calibration files as (µg/mL, path); names are ng/mL or µg/mL per ``filename_unit``."""
+    if filename_unit not in {"ng_per_ml", "ug_per_ml"}:
+        raise ValueError("calibration_filename_unit must be 'ng_per_ml' or 'ug_per_ml'.")
+    divisor = 1000.0 if filename_unit == "ng_per_ml" else 1.0
+    standards = []
+    for path in directory.glob("*.nd2"):
+        try:
+            standards.append((float(path.stem) / divisor, path))
+        except ValueError:
+            continue  # e.g. gradient files or "32withdevice"
+    standards.sort()
     if len(standards) < 3:
         raise ValueError(f"At least three numeric calibration ND2 files are required in {directory}.")
     concentrations = [item[0] for item in standards]
     if 0.0 not in concentrations:
-        raise ValueError("A 0 ng/mL calibration file is required for background estimation.")
+        raise ValueError("A 0 (blank) calibration file is required for background estimation.")
     return standards
 
 
@@ -492,7 +498,7 @@ def run_calibrated_pipeline(
         raise ValueError(f"Calibration directory not found: {calibration_directory}")
     if not config.calibration_z_integrated:
         raise ValueError("The calibration-flatfield workflow currently requires calibration_z_integrated=true.")
-    standards = _discover_standards(calibration_directory)
+    standards = _discover_standards(calibration_directory, config.calibration_filename_unit)
     base = _safe_stem(source_path.stem)
     run_dir = Path(output_root) / f"run_{base}_calibrated_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     step_names = {

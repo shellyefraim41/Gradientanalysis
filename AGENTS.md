@@ -10,9 +10,10 @@ Important constraints:
 - Raw ND2 files and completed output runs belong to the user. Never delete,
   overwrite, rename, or modify them unless Shelly explicitly requests it.
 - Every analysis invocation must create a new timestamped output directory.
-- Do not run all 25 September timepoints until Shelly chooses the final
-  correction policy. The current unresolved choice is documented in
-  `docs/NEXT_STEPS.md`.
+- Shelly chose the September method on 2026-10-04 (hybrid correction, 0–24 µg/mL
+  linear calibration, Z11 main result with Z3–Z12 robustness check); see
+  `docs/NEXT_STEPS.md`. Use `scripts/run_gradient_review.py` and reuse existing
+  measurement caches (`--reuse`) instead of re-reading the ND2 file when possible.
 - Treat ND2 timepoint indices as zero-based. Experimental time is index × 2 h,
   so `t012` is 24 h.
 - Treat displayed Z numbers as one-based unless a field explicitly says

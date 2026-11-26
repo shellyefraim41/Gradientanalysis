@@ -1,6 +1,55 @@
 # Pending decisions and next steps
 
-## Decision required before the full September run
+## Decisions made on 2026-10-04 (Shelly)
+
+After the five-timepoint comparison (`outputs/2026_09_27_exp106_try4_gradient_review_5tp/`):
+
+- **Correction:** hybrid = calibration FFC + residual overlap quadratic, one correction
+  per channel and Z pooled over all timepoints. Held-out seam mismatch ≈1–3% (FFC only
+  ≈5–10%, none ≈12–18%).
+- **Concentration conversion:** straight line through the 0–24 µg/mL standards with an
+  intercept. The 32 µg/mL standard is excluded automatically when every profile value
+  is below the 24 µg/mL standard (true for this dataset: brightest data ≈50% of it).
+  Piecewise interpolation is no longer primary: with one acquisition per standard it
+  inflated slopes by ≈25%. Line-through-zero is reported alongside (≈5% lower slopes).
+- **Depth:** main result = single plane Z11 (one-based; nominal +90 µm above the glass,
+  homeIndex=1, bottom-to-top). Robustness check = mean of Z3–Z12. The full-stack
+  integration is no longer used: Z14–Z15 is a boundary (membrane underside, curved,
+  ~40 µm lower near the bridge), and planes above it are not liquid layer data.
+  Standards share the Z reference, so each depth is calibrated with the same planes.
+- **Stain:** fixed objective rule (`gradient_review.STAIN_RULE`); stain columns are
+  excluded from fits only, always plotted, and unmasked fits are saved for comparison.
+- **Bridge:** detected from the large DIC image (≈2.06–4.03 mm, ≈2 mm as designed) and
+  marked on every profile plot; fit tables state midpoint position relative to it.
+- **Flagged tanh fits** are kept in the main results and additionally analysed with
+  model-free slopes and a relaxed-plateau refit in a separate subfolder. Slopes are
+  robust to the plateau limits; midpoints of flagged fits are not determined.
+- The experiment tests whether the device is diffusion-only (no cells). Profiles suggest
+  net flow; candidate causes (Shelly): stage movement, membrane holes. July data are
+  analysed the same way for comparison.
+
+Workflow: `scripts/run_gradient_review.py` (module `gradient_analysis/gradient_review.py`,
+measurement layer `gradient_analysis/correction_comparison.py`).
+
+## 2026-10-08 dataset (Exp106 try5), analysed 2026-10-11
+
+- `grad.nd2`: 31 timepoints at non-uniform intervals (real times from frame timestamps:
+  0, 0.11, 0.28, 0.45 h, every 0.5 h to 1.95 h, then every 2 h to 49.95 h), 14 positions,
+  16 Z planes (glass at Z2), **10x objective (NA 0.45, 0.6455 µm pixels)**.
+- Calibration standards (file names in µg/mL; `calibration_filename_unit: "ug_per_ml"`)
+  and `32withdevice.nd2` are **20x**. Shelly chose: overlap-quadratic correction only,
+  intensity units (no µg/mL, no FFC) for this dataset; 20x files used only to explain
+  methods. To add µg/mL later, image standards at 10x, ideally in the device.
+- 32 µg/mL with the device is ~40% (GFP) / ~37% (Cy5) of 32 µg/mL in a regular well at Z11;
+  most likely less out-of-focus light under the 150 µm chamber + black membrane. This
+  implies regular-well standards over-estimate signal per µg/mL for device measurements.
+- Background: blank median = 100 in every plane; dye-free gradient regions at 0 h = 100.
+  Constant 100 used.
+- Bridge DIC: `Exp106_try5_largeimag10X_area_0001.nd2` (does not cover the first 0.68 mm).
+- Config: `exp106_2026_10_08_try5_config.json`; outputs in
+  `outputs/2026_10_08_exp106_try5_full_experiment/`.
+
+## Superseded: decision that was required before the full September run
 
 Shelly should choose the final correction policy after reviewing the t012 pilot.
 The current evidence supports testing a hybrid, but that choice has not yet been

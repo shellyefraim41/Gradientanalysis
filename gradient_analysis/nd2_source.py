@@ -151,6 +151,48 @@ class ND2Source:
             raise ValueError(f"Invalid timepoint indices {invalid}; file has {count} timepoints.")
         return selected
 
+    def timepoint_hours(self) -> list[float]:
+        """Acquisition start of every timepoint in hours, from the frame timestamps.
+
+        The first frame of each timepoint (first position, Z, and channel) is used,
+        so non-uniform time loops are reported exactly as acquired.
+        """
+        count = self.sizes.get("T", 1)
+        if count <= 1 or "T" not in self.sizes:
+            return [0.0]
+        loop_axes = [axis for axis in self.axis_order if axis not in {"Y", "X", "C"}]
+        shape = [self.sizes[axis] for axis in loop_axes]
+        hours = []
+        for timepoint in range(count):
+            index = [timepoint if axis == "T" else 0 for axis in loop_axes]
+            sequence = int(np.ravel_multi_index(index, shape))
+            hours.append(float(self._file.frame_metadata(sequence).channels[0].time.relativeTimeMs) / 3.6e6)
+        start = hours[0]
+        return [value - start for value in hours]
+
+    def frame_hours(self, timepoint: int, position: int, z_index_zero_based: int, channel_label: str) -> float:
+        """Acquisition time (hours after the first frame) of one T/P/Z/C plane."""
+        loop_axes = [axis for axis in self.axis_order if axis not in {"Y", "X", "C"}]
+        values = {"T": timepoint, "P": position, "Z": z_index_zero_based}
+        index = [values.get(axis, 0) for axis in loop_axes]
+        sequence = int(np.ravel_multi_index(index, [self.sizes[axis] for axis in loop_axes]))
+        first = float(self._file.frame_metadata(0).channels[0].time.relativeTimeMs)
+        channel = self.channel_indices[channel_label]
+        frame = self._file.frame_metadata(sequence).channels[channel]
+        return (float(frame.time.relativeTimeMs) - first) / 3.6e6
+
+    def z_stack_info(self) -> dict[str, Any]:
+        """Z step, home (reference) index, and direction from the Z-stack loop."""
+        for loop in self._file.experiment:
+            if getattr(loop, "type", "") == "ZStackLoop":
+                parameters = loop.parameters
+                return {
+                    "step_um": float(parameters.stepUm),
+                    "home_index_zero_based": int(getattr(parameters, "homeIndex", 0) or 0),
+                    "bottom_to_top": bool(getattr(parameters, "bottomToTop", True)),
+                }
+        return {"step_um": 10.0, "home_index_zero_based": 0, "bottom_to_top": True}
+
     def plane(
         self,
         timepoint: int,
